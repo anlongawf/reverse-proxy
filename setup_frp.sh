@@ -5,7 +5,6 @@
 # Hỗ trợ phân nhánh Server(VPS) và Client(Pterodactyl Node)
 # ==========================================
 
-# Colors
 GREEN='\e[32m'
 YELLOW='\e[33m'
 RED='\e[31m'
@@ -17,8 +16,8 @@ echo -e "${GREEN}   AUTO SETUP MINECRAFT FRP TUNNEL   ${NC}"
 echo -e "${GREEN}=====================================${NC}"
 
 if [ "$EUID" -ne 0 ]; then
-  echo -e "${RED}[Lỗi] Script yêu cầu quyền root. Vui lòng thử lại với 'sudo bash setup_frp.sh'${NC}"
-  exit 1
+    echo -e "${RED}[Lỗi] Script yêu cầu quyền root. Vui lòng thử lại với 'sudo bash setup_frp.sh'${NC}"
+    exit 1
 fi
 
 # Detect Architecture
@@ -34,18 +33,17 @@ fi
 
 echo -e "Vui lòng chọn hệ thống bạn muốn cài đặt:"
 echo -e "  ${YELLOW}1.${NC} Cài đặt FRP Server (Trên máy chủ Public VPS)"
-echo -e "  ${YELLOW}2.${NC} Cài đặt FRP Client - Port đơn lẻ (Trên Node nội bộ chạy Pterodactyl)"
-echo -e "  ${YELLOW}3.${NC} Cài đặt FRP Client - Range Port (Thêm nhiều port liên tiếp)"
+echo -e "  ${YELLOW}2.${NC} Cài đặt FRP Client (Trên Node nội bộ chạy Pterodactyl)"
 echo -e "  ${YELLOW}0.${NC} Thoát"
-read -p "Lựa chọn của bạn [0-3]: " choice
+read -p "Lựa chọn của bạn [0-2]: " choice
 
-if [[ ! "$choice" =~ ^[1-3]$ ]]; then
+if [[ ! "$choice" =~ ^[1-2]$ ]]; then
     echo "Thoát chương trình."
     exit 0
 fi
 
 # ---------------------------------------------
-# Function: Cài đặt Core rỗng của FRP
+# Function: Cài đặt binary FRP
 # ---------------------------------------------
 install_frp_core() {
     echo -e "${YELLOW}>> Đang lấy phiên bản FRP mới nhất từ GitHub...${NC}"
@@ -60,56 +58,22 @@ install_frp_core() {
     echo -e "${YELLOW}>> Đang tải FRP ${LATEST_RELEASE} (${FRP_ARCH})...${NC}"
     wget -q --show-progress "$DOWNLOAD_URL" -O "/tmp/frp.tar.gz"
 
-    echo -e "${YELLOW}>> Giải nén và cấu hình file hệ thống...${NC}"
+    echo -e "${YELLOW}>> Giải nén và cài đặt binary...${NC}"
     cd /tmp
     tar -xzf frp.tar.gz
     FRP_DIR="frp_${VERSION_NUM}_linux_${FRP_ARCH}"
 
     mkdir -p /etc/frp
+
+    # Dừng service trước khi ghi đè binary tránh lỗi "Text file busy"
+    systemctl stop frps frpc 2>/dev/null
+
     cp "$FRP_DIR/frps" /usr/local/bin/
     cp "$FRP_DIR/frpc" /usr/local/bin/
     chmod +x /usr/local/bin/frps /usr/local/bin/frpc
 
     rm -rf "/tmp/frp.tar.gz" "/tmp/$FRP_DIR"
-    echo -e "${GREEN}>> Tải file chạy cốt lõi FRP thành công.${NC}"
-}
-
-# ---------------------------------------------
-# Function: Kiểm tra tên proxy có bị trùng không
-# ---------------------------------------------
-check_proxy_name_exists() {
-    local name="$1"
-    local config_file="/etc/frp/frpc.toml"
-    if [ -f "$config_file" ] && grep -q "name = \"${name}\"" "$config_file"; then
-        return 0  # Trùng
-    fi
-    return 1  # Không trùng
-}
-
-# ---------------------------------------------
-# Function: Nhập thông tin kết nối Client chung
-# ---------------------------------------------
-get_client_common_info() {
-    while true; do
-        read -p "Nhập Public IP của VPS chạy Server: " vps_ip
-        if [[ $vps_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; fi
-        echo -e "${RED}Vui lòng nhập lại định dạng IPv4 hợp lệ.${NC}"
-    done
-
-    read -p "Cổng điều khiển FRP Server VPS đang dùng [Mặc định: 7000]: " ctrl_port
-    ctrl_port=${ctrl_port:-7000}
-
-    while true; do
-        read -p "Nhập Auth Token đã lưu ở Server: " auth_token
-        if [ -n "$auth_token" ]; then break; fi
-        echo -e "${RED}Token không được để trống!${NC}"
-    done
-
-    echo -e "\n${YELLOW}--- Khởi tạo IP Ảo (Dummy IP) cho Node ---${NC}"
-    echo "Dải phân bổ IP nội bộ gợi ý: 192.168.254.X"
-    read -p "Nhập phần SỐ CUỐI (X) cho IP ảo (1-254) [Mặc định: 1]: " ip_octet
-    ip_octet=${ip_octet:-1}
-    DUMMY_IP="192.168.254.${ip_octet}"
+    echo -e "${GREEN}>> Cài đặt binary FRP thành công.${NC}"
 }
 
 # ---------------------------------------------
@@ -119,7 +83,7 @@ setup_dummy_ip() {
     echo -e "${YELLOW}>> Đang ghim IP ảo ${DUMMY_IP} vào loopback...${NC}"
     cat > /etc/systemd/system/pterodactyl-dummy-ip.service <<EOF
 [Unit]
-Description=Khoi tao IP cuc bo cho Pterodactyl Wings phuc vu he thong proxy
+Description=Khoi tao IP cuc bo cho Pterodactyl Wings
 After=network.target
 
 [Service]
@@ -133,18 +97,16 @@ WantedBy=sysinit.target
 EOF
     systemctl daemon-reload
     systemctl enable --now pterodactyl-dummy-ip.service
-    echo -e "${GREEN}>> Đã tạo IP ảo thành công.${NC}"
+    echo -e "${GREEN}>> Đã tạo IP ảo ${DUMMY_IP} thành công.${NC}"
 }
 
 # ---------------------------------------------
-# Function: Tạo frpc service
-# FIX: Dùng `restart` thay vì `enable --now` để đảm bảo
-#      frpc luôn nhận config mới dù service đang chạy sẵn.
+# Function: Tạo và restart frpc service
 # ---------------------------------------------
 setup_frpc_service() {
     cat > /etc/systemd/system/frpc.service <<EOF
 [Unit]
-Description=FRP Client Tunnel chuyen phat du lieu Pterodactyl
+Description=FRP Client Tunnel Pterodactyl
 After=network.target network-online.target syslog.target pterodactyl-dummy-ip.service
 Wants=network-online.target
 
@@ -159,18 +121,126 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable frpc
-    systemctl restart frpc  # Ép restart để nhận config mới dù service đang chạy sẵn
+    systemctl restart frpc
 }
 
 # ---------------------------------------------
-# MODULE 1: SERVER (VPS)
+# Function: Mở firewall (tcp + udp)
 # ---------------------------------------------
+open_firewall_ports() {
+    local port_start=$1
+    local port_end=$2
+
+    if command -v ufw >/dev/null 2>&1; then
+        if [ "$port_start" -eq "$port_end" ]; then
+            ufw allow ${port_start}/tcp >/dev/null
+            ufw allow ${port_start}/udp >/dev/null
+        else
+            ufw allow ${port_start}:${port_end}/tcp >/dev/null
+            ufw allow ${port_start}:${port_end}/udp >/dev/null
+        fi
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        if [ "$port_start" -eq "$port_end" ]; then
+            firewall-cmd --permanent --add-port=${port_start}/tcp >/dev/null
+            firewall-cmd --permanent --add-port=${port_start}/udp >/dev/null
+        else
+            firewall-cmd --permanent --add-port=${port_start}-${port_end}/tcp >/dev/null
+            firewall-cmd --permanent --add-port=${port_start}-${port_end}/udp >/dev/null
+        fi
+    fi
+}
+
+apply_firewall() {
+    echo -e "${YELLOW}>> Cấu hình Tường Lửa...${NC}"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow 22/tcp comment "SSH" >/dev/null
+        ufw allow ${ctrl_port}/tcp comment "FRP Control" >/dev/null
+        open_firewall_ports 25565 25568
+        open_firewall_ports 19132 19132
+        if [[ "$add_range" =~ ^[Yy]$ ]]; then
+            open_firewall_ports $custom_start $custom_end
+        fi
+        ufw reload >/dev/null
+        echo -e "${GREEN}>> Đã mở port UFW.${NC}"
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port=22/tcp >/dev/null
+        firewall-cmd --permanent --add-port=${ctrl_port}/tcp >/dev/null
+        open_firewall_ports 25565 25568
+        open_firewall_ports 19132 19132
+        if [[ "$add_range" =~ ^[Yy]$ ]]; then
+            open_firewall_ports $custom_start $custom_end
+        fi
+        firewall-cmd --reload >/dev/null
+        echo -e "${GREEN}>> Đã mở port Firewalld.${NC}"
+    else
+        echo -e "${YELLOW}[Cảnh báo] Không tìm thấy firewall. Vui lòng tự mở port trên panel VPS.${NC}"
+    fi
+}
+
+# ---------------------------------------------
+# Function: Ghi proxies TCP+UDP vào frpc.toml
+# ---------------------------------------------
+append_proxies() {
+    local prefix=$1
+    local port_start=$2
+    local port_end=$3
+    local dummy_ip=$4
+
+    for port in $(seq $port_start $port_end); do
+        cat >> /etc/frp/frpc.toml <<EOF
+[[proxies]]
+name = "${prefix}-tcp-${port}"
+type = "tcp"
+localIP = "${dummy_ip}"
+localPort = ${port}
+remotePort = ${port}
+
+[[proxies]]
+name = "${prefix}-udp-${port}"
+type = "udp"
+localIP = "${dummy_ip}"
+localPort = ${port}
+remotePort = ${port}
+
+EOF
+    done
+}
+
+# ---------------------------------------------
+# Function: Nhập thông tin kết nối Client
+# ---------------------------------------------
+get_client_common_info() {
+    while true; do
+        read -p "Nhập Public IP của VPS chạy Server: " vps_ip
+        if [[ $vps_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; fi
+        echo -e "${RED}Định dạng IPv4 không hợp lệ, vui lòng nhập lại.${NC}"
+    done
+
+    read -p "Cổng điều khiển FRP [Mặc định: 7000]: " ctrl_port
+    ctrl_port=${ctrl_port:-7000}
+
+    while true; do
+        read -p "Nhập Auth Token: " auth_token
+        if [ -n "$auth_token" ]; then break; fi
+        echo -e "${RED}Token không được để trống!${NC}"
+    done
+
+    echo -e "\n${YELLOW}--- Khởi tạo IP Ảo (Dummy IP) cho Node ---${NC}"
+    echo "Dải IP nội bộ: 192.168.254.X"
+    read -p "Nhập SỐ CUỐI (X) cho IP ảo (1-254) [Mặc định: 1]: " ip_octet
+    ip_octet=${ip_octet:-1}
+    DUMMY_IP="192.168.254.${ip_octet}"
+}
+
+# ==============================================
+# MODULE 1: SERVER (VPS)
+# ==============================================
 if [ "$choice" == "1" ]; then
     echo -e "\n${GREEN}=== THIẾT LẬP FRP SERVER ===${NC}"
 
-    # --- Chọn IP tĩnh bind ---
+    # --- Bind IP ---
     echo -e "\n${CYAN}--- Chọn IP để bind FRP Server ---${NC}"
-    echo -e "${YELLOW}Danh sách IP tĩnh đang có trên máy:${NC}"
+    echo -e "${YELLOW}Danh sách IP tĩnh trên máy:${NC}"
     mapfile -t IP_LIST < <(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
     if [ ${#IP_LIST[@]} -eq 0 ]; then
         echo -e "${RED}[Cảnh báo] Không detect được IP tĩnh nào.${NC}"
@@ -178,26 +248,20 @@ if [ "$choice" == "1" ]; then
         for i in "${!IP_LIST[@]}"; do
             ip_entry="${IP_LIST[$i]}"
             ip_hint=""
-
-            # Kiểm tra IP có trong frps.toml không
             if [ -f /etc/frp/frps.toml ] && grep -q "${ip_entry}" /etc/frp/frps.toml; then
-                ip_hint="${ip_hint} ${CYAN}[frps.toml]${NC}"
+                ip_hint=" ${CYAN}[frps.toml]${NC}"
             fi
-
-            # Kiểm tra IP có trong frpc.toml không (kèm tên proxy nếu có)
             if [ -f /etc/frp/frpc.toml ] && grep -q "${ip_entry}" /etc/frp/frpc.toml; then
-                # Lấy tất cả tên proxy đang dùng IP này
                 proxy_names=$(grep -B5 "localIP = \"${ip_entry}\"" /etc/frp/frpc.toml \
                     | grep 'name = ' \
                     | sed -E 's/.*name = "(.*)"/\1/' \
-                    | tr '\n' ', ' | sed 's/,$//')
+                    | tr '\n' ',' | sed 's/,$//')
                 if [ -n "$proxy_names" ]; then
                     ip_hint="${ip_hint} ${CYAN}[frpc.toml: ${proxy_names}]${NC}"
                 else
                     ip_hint="${ip_hint} ${CYAN}[frpc.toml]${NC}"
                 fi
             fi
-
             echo -e "  ${YELLOW}$((i+1)).${NC} ${ip_entry}${ip_hint}"
         done
     fi
@@ -214,47 +278,47 @@ if [ "$choice" == "1" ]; then
         bind_ip="${IP_LIST[$((ip_choice-1))]}"
     fi
 
-    # --- Control Port ---
+    # --- Control Port & Token ---
     read -p "Cổng điều khiển FRP Control Port [Mặc định: 7000]: " ctrl_port
     ctrl_port=${ctrl_port:-7000}
 
-    # --- Auth Token ---
     while true; do
-        read -p "Nhập Auth Token bảo mật kết nối (VD: PteroSecret123): " auth_token
+        read -p "Nhập Auth Token bảo mật kết nối: " auth_token
         if [ -n "$auth_token" ]; then break; fi
         echo -e "${RED}Token không được để trống!${NC}"
     done
 
-    # --- Custom Range Port ---
-    echo -e "\n${CYAN}--- Cấu hình Range Port mở trên Firewall ---${NC}"
-    while true; do
-        read -p "Port TCP bắt đầu [Mặc định: 25565]: " tcp_start
-        tcp_start=${tcp_start:-25565}
-        read -p "Port TCP kết thúc  [Mặc định: 25575]: " tcp_end
-        tcp_end=${tcp_end:-25575}
-        if [[ "$tcp_start" =~ ^[0-9]+$ ]] && [[ "$tcp_end" =~ ^[0-9]+$ ]] && [ "$tcp_end" -ge "$tcp_start" ]; then
-            break
-        fi
-        echo -e "${RED}Range không hợp lệ! Port kết thúc phải >= port bắt đầu.${NC}"
-    done
-
-    read -p "Port UDP Bedrock [Mặc định: 19132]: " udp_port
-    udp_port=${udp_port:-19132}
+    # --- Custom range port ---
+    echo -e "\n${CYAN}--- Cấu hình Port ---${NC}"
+    echo -e "Mặc định sẽ mở: ${YELLOW}25565-25568 (TCP+UDP)${NC} và ${YELLOW}19132 (TCP+UDP)${NC}"
+    read -p "Thêm custom range port? (y/N): " add_range
+    if [[ "$add_range" =~ ^[Yy]$ ]]; then
+        while true; do
+            read -p "Port bắt đầu: " custom_start
+            read -p "Port kết thúc: " custom_end
+            if [[ "$custom_start" =~ ^[0-9]+$ ]] && [[ "$custom_end" =~ ^[0-9]+$ ]] && [ "$custom_end" -ge "$custom_start" ]; then
+                break
+            fi
+            echo -e "${RED}Range không hợp lệ!${NC}"
+        done
+    fi
 
     # --- Tóm tắt ---
     echo -e "\n${YELLOW}Tóm tắt cấu hình Server:${NC}"
-    echo " - Bind IP    : ${bind_ip:-"0.0.0.0 (tất cả IP)"}"
-    echo " - Control Port: $ctrl_port"
-    echo " - Auth Token : $auth_token"
-    echo " - TCP Ports  : $tcp_start - $tcp_end"
-    echo " - UDP Port   : $udp_port"
+    echo " - Bind IP      : ${bind_ip:-"0.0.0.0 (tất cả IP)"}"
+    echo " - Control Port : $ctrl_port"
+    echo " - Auth Token   : $auth_token"
+    echo " - Minecraft    : 25565-25568 + 19132 (TCP+UDP)"
+    if [[ "$add_range" =~ ^[Yy]$ ]]; then
+        echo " - Custom Range : $custom_start - $custom_end (TCP+UDP)"
+    fi
 
     read -p "Bạn có chắc chắn muốn cài đặt? (Y/n): " confirm
     if [[ "$confirm" =~ ^[Nn]$ ]]; then exit 0; fi
 
     install_frp_core
 
-    # Ghi config frps — có hoặc không bind IP cụ thể
+    # --- Ghi frps.toml ---
     if [ -n "$bind_ip" ]; then
         cat > /etc/frp/frps.toml <<EOF
 bindAddr = "${bind_ip}"
@@ -268,25 +332,9 @@ auth.token = "${auth_token}"
 EOF
     fi
 
-    echo -e "${YELLOW}>> Cấu hình Tường Lửa (Firewall)...${NC}"
-    if command -v ufw >/dev/null 2>&1; then
-        ufw allow 22/tcp comment "SSH Failsafe"
-        ufw allow ${ctrl_port}/tcp comment "FRP Control Port"
-        ufw allow ${tcp_start}:${tcp_end}/tcp comment "Minecraft Java"
-        ufw allow ${udp_port}/udp comment "Minecraft Bedrock"
-        ufw reload
-        echo -e "${GREEN}>> Đã mở port UFW.${NC}"
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --permanent --add-port=22/tcp
-        firewall-cmd --permanent --add-port=${ctrl_port}/tcp
-        firewall-cmd --permanent --add-port=${tcp_start}-${tcp_end}/tcp
-        firewall-cmd --permanent --add-port=${udp_port}/udp
-        firewall-cmd --reload
-        echo -e "${GREEN}>> Đã mở port Firewalld.${NC}"
-    else
-        echo -e "${YELLOW}[Cảnh báo] Không tìm thấy firewall. Vui lòng tự mở port trên panel VPS.${NC}"
-    fi
+    apply_firewall
 
+    # --- frps service ---
     cat > /etc/systemd/system/frps.service <<EOF
 [Unit]
 Description=FRP Server System
@@ -306,47 +354,49 @@ EOF
     systemctl daemon-reload
     systemctl enable frps
     systemctl restart frps
+
     echo -e "${GREEN}==========================================${NC}"
-    echo -e "${GREEN}Hoàn tất cài đặt Server FRP. Trạng thái:${NC}"
+    echo -e "${GREEN}Hoàn tất cài đặt FRP Server!${NC}"
     systemctl status frps --no-pager | grep Active
-    echo -e "${YELLOW}>> Bind IP     : ${bind_ip:-"0.0.0.0 (tất cả IP)"}${NC}"
-    echo -e "${YELLOW}>> TCP Range   : ${tcp_start} - ${tcp_end}${NC}"
-    echo -e "${YELLOW}>> UDP Port    : ${udp_port}${NC}"
+    echo -e "${YELLOW}>> Bind IP   : ${bind_ip:-"0.0.0.0 (tất cả IP)"}${NC}"
+    echo -e "${YELLOW}>> Minecraft : 25565-25568 + 19132 (TCP+UDP)${NC}"
+    if [[ "$add_range" =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}>> Custom    : ${custom_start}-${custom_end} (TCP+UDP)${NC}"
+    fi
     echo -e "${GREEN}==========================================${NC}"
 fi
 
-# ---------------------------------------------
-# MODULE 2: CLIENT - PORT ĐƠN LẺ
-# ---------------------------------------------
+# ==============================================
+# MODULE 2: CLIENT (NODE PTERODACTYL)
+# ==============================================
 if [ "$choice" == "2" ]; then
-    echo -e "\n${GREEN}=== THIẾT LẬP FRP CLIENT - PORT ĐƠN LẺ ===${NC}"
+    echo -e "\n${GREEN}=== THIẾT LẬP FRP CLIENT (PTERODACTYL NODE) ===${NC}"
 
     get_client_common_info
 
-    # Đặt tên proxy
-    echo -e "\n${CYAN}--- Cấu hình Proxy ---${NC}"
-    while true; do
-        read -p "Đặt tên cho proxy này (VD: server-survival, hub-node1): " proxy_name
-        if [ -z "$proxy_name" ]; then
-            echo -e "${RED}Tên không được để trống!${NC}"
-            continue
-        fi
-        if check_proxy_name_exists "$proxy_name"; then
-            echo -e "${RED}[Lỗi] Tên proxy '${proxy_name}' đã tồn tại trong config! Vui lòng chọn tên khác.${NC}"
-            continue
-        fi
-        break
-    done
+    # --- Custom range port ---
+    echo -e "\n${CYAN}--- Cấu hình Port ---${NC}"
+    echo -e "Mặc định sẽ tunnel: ${YELLOW}25565-25568 (TCP+UDP)${NC} và ${YELLOW}19132 (TCP+UDP)${NC}"
+    read -p "Thêm custom range port? (y/N): " add_range
+    if [[ "$add_range" =~ ^[Yy]$ ]]; then
+        while true; do
+            read -p "Port bắt đầu: " custom_start
+            read -p "Port kết thúc: " custom_end
+            if [[ "$custom_start" =~ ^[0-9]+$ ]] && [[ "$custom_end" =~ ^[0-9]+$ ]] && [ "$custom_end" -ge "$custom_start" ]; then
+                break
+            fi
+            echo -e "${RED}Range không hợp lệ!${NC}"
+        done
+    fi
 
-    read -p "Nhập port local (port trên Node): " local_port
-    read -p "Nhập port remote (port expose ra VPS): " remote_port
-
+    # --- Tóm tắt ---
     echo -e "\n${YELLOW}Tóm tắt cấu hình Client:${NC}"
     echo " - Kết nối Server : $vps_ip:$ctrl_port"
     echo " - Dummy IP       : ${DUMMY_IP}"
-    echo " - Tên Proxy      : ${proxy_name}-tcp / ${proxy_name}-udp"
-    echo " - Port Local     : $local_port → Remote: $remote_port"
-    echo " - Loại           : TCP + UDP (tạo cả 2)"
+    echo " - Minecraft      : 25565-25568 + 19132 (TCP+UDP)"
+    if [[ "$add_range" =~ ^[Yy]$ ]]; then
+        echo " - Custom Range   : $custom_start - $custom_end (TCP+UDP)"
+    fi
 
     read -p "Tiếp tục cài đặt? (Y/n): " confirm
     if [[ "$confirm" =~ ^[Nn]$ ]]; then exit 0; fi
@@ -354,89 +404,8 @@ if [ "$choice" == "2" ]; then
     setup_dummy_ip
     install_frp_core
 
-    echo -e "${YELLOW}>> Tạo file cấu hình frpc...${NC}"
-
-    # Nếu file chưa có thì tạo header, nếu có rồi thì chỉ append proxy
-    if [ ! -f /etc/frp/frpc.toml ]; then
-        cat > /etc/frp/frpc.toml <<EOF
-serverAddr = "${vps_ip}"
-serverPort = ${ctrl_port}
-auth.token = "${auth_token}"
-
-EOF
-    fi
-
-    cat >> /etc/frp/frpc.toml <<EOF
-[[proxies]]
-name = "${proxy_name}-tcp"
-type = "tcp"
-localIP = "${DUMMY_IP}"
-localPort = ${local_port}
-remotePort = ${remote_port}
-
-[[proxies]]
-name = "${proxy_name}-udp"
-type = "udp"
-localIP = "${DUMMY_IP}"
-localPort = ${local_port}
-remotePort = ${remote_port}
-
-EOF
-
-    setup_frpc_service
-
-    echo -e "${GREEN}==========================================${NC}"
-    echo -e "${GREEN}Hoàn tất! FRPC đang chạy:${NC}"
-    systemctl status frpc --no-pager | grep Active
-    echo -e "${YELLOW}>> Pterodactyl Node: IP Address = ${DUMMY_IP} | IP Alias = ${vps_ip}${NC}"
-    echo -e "${GREEN}==========================================${NC}"
-fi
-
-# ---------------------------------------------
-# MODULE 3: CLIENT - RANGE PORT
-# ---------------------------------------------
-if [ "$choice" == "3" ]; then
-    echo -e "\n${GREEN}=== THIẾT LẬP FRP CLIENT - RANGE PORT ===${NC}"
-
-    get_client_common_info
-
-    echo -e "\n${CYAN}--- Cấu hình Range Port ---${NC}"
-
-    read -p "Đặt tên prefix cho range này (VD: survival, lobby, minigame): " proxy_prefix
-    if [ -z "$proxy_prefix" ]; then
-        echo -e "${RED}Tên không được để trống!${NC}"
-        exit 1
-    fi
-
-    while true; do
-        read -p "Port bắt đầu (VD: 25565): " port_start
-        read -p "Port kết thúc (VD: 25570): " port_end
-        if [[ "$port_start" =~ ^[0-9]+$ ]] && [[ "$port_end" =~ ^[0-9]+$ ]] && [ "$port_end" -ge "$port_start" ]; then
-            break
-        fi
-        echo -e "${RED}Port không hợp lệ! Port kết thúc phải lớn hơn hoặc bằng port bắt đầu.${NC}"
-    done
-
-    total_ports=$((port_end - port_start + 1))
-    total_proxies=$((total_ports * 2))
-
-    echo -e "\n${YELLOW}Tóm tắt cấu hình Range Port:${NC}"
-    echo " - Kết nối Server : $vps_ip:$ctrl_port"
-    echo " - Dummy IP       : ${DUMMY_IP}"
-    echo " - Prefix Proxy   : ${proxy_prefix}-tcp-[port] / ${proxy_prefix}-udp-[port]"
-    echo " - Loại           : TCP + UDP (tạo cả 2)"
-    echo " - Range Port     : ${port_start} → ${port_end} (${total_ports} ports × 2 = ${total_proxies} proxies)"
-    echo -e " ${RED}⚠ Config cũ (/etc/frp/frpc.toml) sẽ bị XÓA và tạo mới hoàn toàn!${NC}"
-
-    read -p "Tiếp tục cài đặt? (Y/n): " confirm
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then exit 0; fi
-
-    setup_dummy_ip
-    install_frp_core
-
-    echo -e "${YELLOW}>> Tạo mới hoàn toàn file cấu hình frpc với ${total_proxies} proxies...${NC}"
-
-    # Luôn tạo mới config, xóa file cũ nếu có (thiết kế có chủ ý - đã cảnh báo người dùng ở trên)
+    # --- Ghi frpc.toml ---
+    echo -e "${YELLOW}>> Tạo file cấu hình frpc.toml...${NC}"
     cat > /etc/frp/frpc.toml <<EOF
 serverAddr = "${vps_ip}"
 serverPort = ${ctrl_port}
@@ -444,32 +413,22 @@ auth.token = "${auth_token}"
 
 EOF
 
-    for port in $(seq $port_start $port_end); do
-        cat >> /etc/frp/frpc.toml <<EOF
-[[proxies]]
-name = "${proxy_prefix}-tcp-${port}"
-type = "tcp"
-localIP = "${DUMMY_IP}"
-localPort = ${port}
-remotePort = ${port}
+    # Minecraft mặc định: 25565-25568 + 19132 (TCP+UDP)
+    append_proxies "mc" 25565 25568 "${DUMMY_IP}"
+    append_proxies "mc" 19132 19132 "${DUMMY_IP}"
 
-[[proxies]]
-name = "${proxy_prefix}-udp-${port}"
-type = "udp"
-localIP = "${DUMMY_IP}"
-localPort = ${port}
-remotePort = ${port}
-
-EOF
-    done
-
-    echo -e "${GREEN}>> Đã tạo ${total_proxies} proxies (TCP + UDP) vào config mới.${NC}"
+    # Custom range nếu có
+    if [[ "$add_range" =~ ^[Yy]$ ]]; then
+        append_proxies "mc" $custom_start $custom_end "${DUMMY_IP}"
+    fi
 
     setup_frpc_service
 
     echo -e "${GREEN}==========================================${NC}"
-    echo -e "${GREEN}Hoàn tất! FRPC đang chạy:${NC}"
+    echo -e "${GREEN}Hoàn tất! FRP Client đang chạy:${NC}"
     systemctl status frpc --no-pager | grep Active
-    echo -e "${YELLOW}>> Pterodactyl Node: IP Address = ${DUMMY_IP} | IP Alias = ${vps_ip}${NC}"
+    echo -e "${YELLOW}>> Pterodactyl Node:${NC}"
+    echo -e "${YELLOW}   IP Address = ${DUMMY_IP}${NC}"
+    echo -e "${YELLOW}   IP Alias   = ${vps_ip}${NC}"
     echo -e "${GREEN}==========================================${NC}"
 fi
