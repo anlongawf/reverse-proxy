@@ -168,44 +168,97 @@ EOF
 if [ "$choice" == "1" ]; then
     echo -e "\n${GREEN}=== THIẾT LẬP FRP SERVER ===${NC}"
 
+    # --- Chọn IP tĩnh bind ---
+    echo -e "\n${CYAN}--- Chọn IP để bind FRP Server ---${NC}"
+    echo -e "${YELLOW}Danh sách IP tĩnh đang có trên máy:${NC}"
+    mapfile -t IP_LIST < <(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    if [ ${#IP_LIST[@]} -eq 0 ]; then
+        echo -e "${RED}[Cảnh báo] Không detect được IP tĩnh nào.${NC}"
+    else
+        for i in "${!IP_LIST[@]}"; do
+            echo -e "  ${YELLOW}$((i+1)).${NC} ${IP_LIST[$i]}"
+        done
+    fi
+    echo -e "  ${YELLOW}0.${NC} Tự gõ tay IP khác"
+    read -p "Chọn IP [0-${#IP_LIST[@]}]: " ip_choice
+
+    if [[ "$ip_choice" == "0" ]] || [[ -z "$ip_choice" ]] || [[ ! "$ip_choice" =~ ^[0-9]+$ ]] || [ "$ip_choice" -gt "${#IP_LIST[@]}" ]; then
+        while true; do
+            read -p "Nhập IP muốn bind (bỏ trống = bind tất cả IP): " bind_ip
+            if [[ -z "$bind_ip" ]] || [[ $bind_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; fi
+            echo -e "${RED}Định dạng IP không hợp lệ!${NC}"
+        done
+    else
+        bind_ip="${IP_LIST[$((ip_choice-1))]}"
+    fi
+
+    # --- Control Port ---
     read -p "Cổng điều khiển FRP Control Port [Mặc định: 7000]: " ctrl_port
     ctrl_port=${ctrl_port:-7000}
 
+    # --- Auth Token ---
     while true; do
         read -p "Nhập Auth Token bảo mật kết nối (VD: PteroSecret123): " auth_token
         if [ -n "$auth_token" ]; then break; fi
         echo -e "${RED}Token không được để trống!${NC}"
     done
 
+    # --- Custom Range Port ---
+    echo -e "\n${CYAN}--- Cấu hình Range Port mở trên Firewall ---${NC}"
+    while true; do
+        read -p "Port TCP bắt đầu [Mặc định: 25565]: " tcp_start
+        tcp_start=${tcp_start:-25565}
+        read -p "Port TCP kết thúc  [Mặc định: 25575]: " tcp_end
+        tcp_end=${tcp_end:-25575}
+        if [[ "$tcp_start" =~ ^[0-9]+$ ]] && [[ "$tcp_end" =~ ^[0-9]+$ ]] && [ "$tcp_end" -ge "$tcp_start" ]; then
+            break
+        fi
+        echo -e "${RED}Range không hợp lệ! Port kết thúc phải >= port bắt đầu.${NC}"
+    done
+
+    read -p "Port UDP Bedrock [Mặc định: 19132]: " udp_port
+    udp_port=${udp_port:-19132}
+
+    # --- Tóm tắt ---
     echo -e "\n${YELLOW}Tóm tắt cấu hình Server:${NC}"
+    echo " - Bind IP    : ${bind_ip:-"0.0.0.0 (tất cả IP)"}"
     echo " - Control Port: $ctrl_port"
     echo " - Auth Token : $auth_token"
-    echo " - TCP Ports  : 25565 - 25568"
-    echo " - UDP Port   : 19132"
+    echo " - TCP Ports  : $tcp_start - $tcp_end"
+    echo " - UDP Port   : $udp_port"
 
     read -p "Bạn có chắc chắn muốn cài đặt? (Y/n): " confirm
     if [[ "$confirm" =~ ^[Nn]$ ]]; then exit 0; fi
 
     install_frp_core
 
-    cat > /etc/frp/frps.toml <<EOF
-bindPort = $ctrl_port
-auth.token = "$auth_token"
+    # Ghi config frps — có hoặc không bind IP cụ thể
+    if [ -n "$bind_ip" ]; then
+        cat > /etc/frp/frps.toml <<EOF
+bindAddr = "${bind_ip}"
+bindPort = ${ctrl_port}
+auth.token = "${auth_token}"
 EOF
+    else
+        cat > /etc/frp/frps.toml <<EOF
+bindPort = ${ctrl_port}
+auth.token = "${auth_token}"
+EOF
+    fi
 
     echo -e "${YELLOW}>> Cấu hình Tường Lửa (Firewall)...${NC}"
     if command -v ufw >/dev/null 2>&1; then
         ufw allow 22/tcp comment "SSH Failsafe"
-        ufw allow $ctrl_port/tcp comment "FRP Control Port"
-        ufw allow 25565:25568/tcp comment "Minecraft Java"
-        ufw allow 19132/udp comment "Minecraft Bedrock"
+        ufw allow ${ctrl_port}/tcp comment "FRP Control Port"
+        ufw allow ${tcp_start}:${tcp_end}/tcp comment "Minecraft Java"
+        ufw allow ${udp_port}/udp comment "Minecraft Bedrock"
         ufw reload
         echo -e "${GREEN}>> Đã mở port UFW.${NC}"
     elif command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --add-port=22/tcp
         firewall-cmd --permanent --add-port=${ctrl_port}/tcp
-        firewall-cmd --permanent --add-port=25565-25568/tcp
-        firewall-cmd --permanent --add-port=19132/udp
+        firewall-cmd --permanent --add-port=${tcp_start}-${tcp_end}/tcp
+        firewall-cmd --permanent --add-port=${udp_port}/udp
         firewall-cmd --reload
         echo -e "${GREEN}>> Đã mở port Firewalld.${NC}"
     else
@@ -229,10 +282,14 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now frps
+    systemctl enable frps
+    systemctl restart frps
     echo -e "${GREEN}==========================================${NC}"
     echo -e "${GREEN}Hoàn tất cài đặt Server FRP. Trạng thái:${NC}"
     systemctl status frps --no-pager | grep Active
+    echo -e "${YELLOW}>> Bind IP     : ${bind_ip:-"0.0.0.0 (tất cả IP)"}${NC}"
+    echo -e "${YELLOW}>> TCP Range   : ${tcp_start} - ${tcp_end}${NC}"
+    echo -e "${YELLOW}>> UDP Port    : ${udp_port}${NC}"
     echo -e "${GREEN}==========================================${NC}"
 fi
 
