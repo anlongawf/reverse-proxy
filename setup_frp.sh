@@ -34,10 +34,11 @@ fi
 echo -e "Vui lòng chọn hệ thống bạn muốn cài đặt:"
 echo -e "  ${YELLOW}1.${NC} Cài đặt FRP Server (Trên máy chủ Public VPS)"
 echo -e "  ${YELLOW}2.${NC} Cài đặt FRP Client (Trên Node nội bộ chạy Pterodactyl)"
+echo -e "  ${YELLOW}4.${NC} Gỡ cài đặt hoàn toàn FRP & Clean hệ thống"
 echo -e "  ${YELLOW}0.${NC} Thoát"
-read -p "Lựa chọn của bạn [0-2]: " choice
+read -p "Lựa chọn của bạn [0-4]: " choice
 
-if [[ ! "$choice" =~ ^[1-2]$ ]]; then
+if [[ ! "$choice" =~ ^[1-4]$ ]]; then
     echo "Thoát chương trình."
     exit 0
 fi
@@ -441,5 +442,47 @@ EOF
     echo -e "${YELLOW}>> Pterodactyl Node:${NC}"
     echo -e "${YELLOW}   IP Address = ${DUMMY_IP}${NC}"
     echo -e "${YELLOW}   IP Alias   = ${vps_ip}${NC}"
+    echo -e "${GREEN}==========================================${NC}"
+# ==============================================
+# MODULE 4: UNINSTALL
+# ==============================================
+if [ "$choice" == "4" ]; then
+    echo -e "\n${RED}=== TIẾN HÀNH GỠ CÀI ĐẶT HOÀN TOÀN FRP ===${NC}"
+    read -p "Bạn có chắc chắn muốn xoá sạch mọi cấu hình FRP? (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then exit 0; fi
+
+    echo -e "${YELLOW}>> Đang dừng và gỡ bỏ tất cả các service liên quan...${NC}"
+    
+    # Tìm và list các service frps-*, frpc-*, pterodactyl-dummy-ip-*
+    SERVICES=$(systemctl list-unit-files | grep -E 'frps-|frpc-|pterodactyl-dummy-ip-' | awk '{print $1}')
+    # Thêm cả các service cũ nếu có
+    SERVICES="${SERVICES} frps.service frpc.service pterodactyl-dummy-ip.service"
+
+    for svc in ${SERVICES}; do
+        if [ -f "/etc/systemd/system/${svc}" ] || [ -f "/lib/systemd/system/${svc}" ]; then
+            echo "  - Đang dừng ${svc}..."
+            systemctl stop "${svc}" 2>/dev/null
+            systemctl disable "${svc}" 2>/dev/null
+            rm -f "/etc/systemd/system/${svc}"
+            echo "  - Đã xoá ${svc}"
+        fi
+    done
+
+    systemctl daemon-reload
+    systemctl reset-failed
+
+    echo -e "${YELLOW}>> Đang gỡ bỏ binary và cấu hình...${NC}"
+    rm -f /usr/local/bin/frps /usr/local/bin/frpc
+    rm -rf /etc/frp
+    
+    echo -e "${YELLOW}>> Đang dọn dẹp các IP ảo trên loopback (192.168.254.X)...${NC}"
+    # Xoá tất cả IP trong dải dummy 192.168.254.0/24 trên interface lo
+    ip addr show dev lo | grep "192.168.254." | awk '{print $2}' | while read -r ip_cidr; do
+        echo "  - Đang gỡ IP: ${ip_cidr}"
+        ip addr del "${ip_cidr}" dev lo 2>/dev/null
+    done
+
+    echo -e "${GREEN}==========================================${NC}"
+    echo -e "${GREEN}ĐÃ GỠ CÀI ĐẶT HOÀN TOÀN! Hệ thống đã sạch sẽ.${NC}"
     echo -e "${GREEN}==========================================${NC}"
 fi
