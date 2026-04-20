@@ -65,8 +65,8 @@ install_frp_core() {
 
     mkdir -p /etc/frp
 
-    # Dừng service trước khi ghi đè binary tránh lỗi "Text file busy"
-    systemctl stop frps frpc 2>/dev/null
+    # Dừng tất cả frps/frpc service trước khi ghi đè binary tránh lỗi "Text file busy"
+    systemctl stop $(systemctl list-units --type=service --state=running --no-legend | grep -oE 'frp[sc]-[^ ]+') 2>/dev/null || true
 
     cp "$FRP_DIR/frps" /usr/local/bin/
     cp "$FRP_DIR/frpc" /usr/local/bin/
@@ -104,15 +104,17 @@ EOF
 # Function: Tạo và restart frpc service
 # ---------------------------------------------
 setup_frpc_service() {
-    cat > /etc/systemd/system/frpc.service <<EOF
+    SERVICE_NAME="frpc-${DUMMY_IP//./-}"
+
+    cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=FRP Client Tunnel Pterodactyl
+Description=FRP Client ${SERVICE_NAME}
 After=network.target network-online.target syslog.target pterodactyl-dummy-ip.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
+ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc-${DUMMY_IP}.toml
 Restart=on-failure
 RestartSec=5s
 
@@ -120,8 +122,8 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable frpc
-    systemctl restart frpc
+    systemctl enable "${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}"
 }
 
 # ---------------------------------------------
@@ -334,10 +336,12 @@ EOF
 
     apply_firewall
 
-    # --- frps service ---
-    cat > /etc/systemd/system/frps.service <<EOF
+    # --- frps service (đặt tên theo bind IP để tránh trùng) ---
+    FRPS_SERVICE_NAME="frps-${bind_ip:-main}"
+
+    cat > /etc/systemd/system/${FRPS_SERVICE_NAME}.service <<EOF
 [Unit]
-Description=FRP Server System
+Description=FRP Server ${FRPS_SERVICE_NAME}
 After=network.target network-online.target syslog.target
 Wants=network-online.target
 
@@ -352,12 +356,13 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable frps
-    systemctl restart frps
+    systemctl enable "${FRPS_SERVICE_NAME}"
+    systemctl restart "${FRPS_SERVICE_NAME}"
 
     echo -e "${GREEN}==========================================${NC}"
     echo -e "${GREEN}Hoàn tất cài đặt FRP Server!${NC}"
-    systemctl status frps --no-pager | grep Active
+    systemctl status "${FRPS_SERVICE_NAME}" --no-pager | grep Active
+    echo -e "${YELLOW}>> Service   : ${FRPS_SERVICE_NAME}.service${NC}"
     echo -e "${YELLOW}>> Bind IP   : ${bind_ip:-"0.0.0.0 (tất cả IP)"}${NC}"
     echo -e "${YELLOW}>> Minecraft : 25565-25568 + 19132 (TCP+UDP)${NC}"
     if [[ "$add_range" =~ ^[Yy]$ ]]; then
@@ -404,9 +409,10 @@ if [ "$choice" == "2" ]; then
     setup_dummy_ip
     install_frp_core
 
-    # --- Ghi frpc.toml ---
-    echo -e "${YELLOW}>> Tạo file cấu hình frpc.toml...${NC}"
-    cat > /etc/frp/frpc.toml <<EOF
+    # --- Ghi frpc-{DUMMY_IP}.toml (riêng cho từng node theo IP) ---
+    FRPC_CONFIG="/etc/frp/frpc-${DUMMY_IP}.toml"
+    echo -e "${YELLOW}>> Tạo file cấu hình ${FRPC_CONFIG}...${NC}"
+    cat > "${FRPC_CONFIG}" <<EOF
 serverAddr = "${vps_ip}"
 serverPort = ${ctrl_port}
 auth.token = "${auth_token}"
@@ -424,9 +430,12 @@ EOF
 
     setup_frpc_service
 
+    FRPC_SERVICE_NAME="frpc-${DUMMY_IP//./-}"
     echo -e "${GREEN}==========================================${NC}"
     echo -e "${GREEN}Hoàn tất! FRP Client đang chạy:${NC}"
-    systemctl status frpc --no-pager | grep Active
+    systemctl status "${FRPC_SERVICE_NAME}" --no-pager | grep Active
+    echo -e "${YELLOW}>> Service   : ${FRPC_SERVICE_NAME}.service${NC}"
+    echo -e "${YELLOW}>> Config    : ${FRPC_CONFIG}${NC}"
     echo -e "${YELLOW}>> Pterodactyl Node:${NC}"
     echo -e "${YELLOW}   IP Address = ${DUMMY_IP}${NC}"
     echo -e "${YELLOW}   IP Alias   = ${vps_ip}${NC}"
