@@ -176,7 +176,29 @@ if [ "$choice" == "1" ]; then
         echo -e "${RED}[Cảnh báo] Không detect được IP tĩnh nào.${NC}"
     else
         for i in "${!IP_LIST[@]}"; do
-            echo -e "  ${YELLOW}$((i+1)).${NC} ${IP_LIST[$i]}"
+            ip_entry="${IP_LIST[$i]}"
+            ip_hint=""
+
+            # Kiểm tra IP có trong frps.toml không
+            if [ -f /etc/frp/frps.toml ] && grep -q "${ip_entry}" /etc/frp/frps.toml; then
+                ip_hint="${ip_hint} ${CYAN}[frps.toml]${NC}"
+            fi
+
+            # Kiểm tra IP có trong frpc.toml không (kèm tên proxy nếu có)
+            if [ -f /etc/frp/frpc.toml ] && grep -q "${ip_entry}" /etc/frp/frpc.toml; then
+                # Lấy tất cả tên proxy đang dùng IP này
+                proxy_names=$(grep -B5 "localIP = \"${ip_entry}\"" /etc/frp/frpc.toml \
+                    | grep 'name = ' \
+                    | sed -E 's/.*name = "(.*)"/\1/' \
+                    | tr '\n' ', ' | sed 's/,$//')
+                if [ -n "$proxy_names" ]; then
+                    ip_hint="${ip_hint} ${CYAN}[frpc.toml: ${proxy_names}]${NC}"
+                else
+                    ip_hint="${ip_hint} ${CYAN}[frpc.toml]${NC}"
+                fi
+            fi
+
+            echo -e "  ${YELLOW}$((i+1)).${NC} ${ip_entry}${ip_hint}"
         done
     fi
     echo -e "  ${YELLOW}0.${NC} Tự gõ tay IP khác"
