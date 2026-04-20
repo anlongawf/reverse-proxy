@@ -80,10 +80,11 @@ install_frp_core() {
 # Function: Tạo Dummy IP service
 # ---------------------------------------------
 setup_dummy_ip() {
+    SERVICE_NAME="pterodactyl-dummy-ip-${DUMMY_IP//./-}"
     echo -e "${YELLOW}>> Đang ghim IP ảo ${DUMMY_IP} vào loopback...${NC}"
-    cat > /etc/systemd/system/pterodactyl-dummy-ip.service <<EOF
+    cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=Khoi tao IP cuc bo cho Pterodactyl Wings
+Description=Khoi tao IP cuc bo ${DUMMY_IP} cho Pterodactyl Wings
 After=network.target
 
 [Service]
@@ -96,7 +97,7 @@ ExecStop=/sbin/ip addr del ${DUMMY_IP}/32 dev lo
 WantedBy=sysinit.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now pterodactyl-dummy-ip.service
+    systemctl enable --now "${SERVICE_NAME}"
     echo -e "${GREEN}>> Đã tạo IP ảo ${DUMMY_IP} thành công.${NC}"
 }
 
@@ -109,8 +110,9 @@ setup_frpc_service() {
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=FRP Client ${SERVICE_NAME}
-After=network.target network-online.target syslog.target pterodactyl-dummy-ip.service
+After=network.target network-online.target syslog.target pterodactyl-dummy-ip-${DUMMY_IP//./-}.service
 Wants=network-online.target
+Wants=pterodactyl-dummy-ip-${DUMMY_IP//./-}.service
 
 [Service]
 Type=simple
