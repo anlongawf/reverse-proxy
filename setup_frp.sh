@@ -443,6 +443,8 @@ EOF
     echo -e "${YELLOW}   IP Address = ${DUMMY_IP}${NC}"
     echo -e "${YELLOW}   IP Alias   = ${vps_ip}${NC}"
     echo -e "${GREEN}==========================================${NC}"
+fi
+
 # ==============================================
 # MODULE 4: UNINSTALL
 # ==============================================
