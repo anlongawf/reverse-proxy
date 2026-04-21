@@ -81,6 +81,10 @@ install_frp_core() {
 # Function: Tạo Dummy IP service
 # ---------------------------------------------
 setup_dummy_ip() {
+    if [ "$DUMMY_IP" == "127.0.0.1" ]; then
+        echo -e "${GREEN}>> Sử dụng local loopback (127.0.0.1), bỏ qua bước tạo IP ảo.${NC}"
+        return 0
+    fi
     SERVICE_NAME="pterodactyl-dummy-ip-${DUMMY_IP//./-}"
     echo -e "${YELLOW}>> Đang ghim IP ảo ${DUMMY_IP} vào loopback...${NC}"
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
@@ -108,12 +112,19 @@ EOF
 setup_frpc_service() {
     SERVICE_NAME="frpc-${DUMMY_IP//./-}"
 
+    if [ "$DUMMY_IP" == "127.0.0.1" ]; then
+        AFTER_DEP="network.target network-online.target syslog.target"
+        WANTS_DEP="network-online.target"
+    else
+        AFTER_DEP="network.target network-online.target syslog.target pterodactyl-dummy-ip-${DUMMY_IP//./-}.service"
+        WANTS_DEP="network-online.target pterodactyl-dummy-ip-${DUMMY_IP//./-}.service"
+    fi
+
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=FRP Client ${SERVICE_NAME}
-After=network.target network-online.target syslog.target pterodactyl-dummy-ip-${DUMMY_IP//./-}.service
-Wants=network-online.target
-Wants=pterodactyl-dummy-ip-${DUMMY_IP//./-}.service
+After=${AFTER_DEP}
+Wants=${WANTS_DEP}
 
 [Service]
 Type=simple
@@ -485,8 +496,8 @@ if [ "$choice" == "4" ]; then
     fi
     
     echo -e "${YELLOW}>> Đang dọn dẹp các IP ảo trên loopback...${NC}"
-    # Xoá tất cả IP ảo mà script này thường tạo (X.X.X.X/32 trên lo)
-    ip addr show dev lo | grep "/32" | awk '{print $2}' | while read -r ip_cidr; do
+    # Xoá tất cả IP ảo mà script này từng tạo (IP/32 ngoại trừ 127.0.0.1)
+    ip addr show dev lo | grep "/32" | grep -v "127.0.0.1" | awk '{print $2}' | while read -r ip_cidr; do
         echo "  - Đang gỡ IP: ${ip_cidr}"
         ip addr del "${ip_cidr}" dev lo 2>/dev/null
     done
