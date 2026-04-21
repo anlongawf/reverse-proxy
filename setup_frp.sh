@@ -183,10 +183,30 @@ read -p "Lựa chọn: " choice
 
 # --- SERVER ---
 if [ "$choice" == "1" ]; then
+    echo -e "\n${CYAN}--- Chọn IP để bind FRP Server ---${NC}"
     mapfile -t IP_LIST < <(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    for i in "${!IP_LIST[@]}"; do echo -e "  $((i+1)). ${IP_LIST[$i]}"; done
-    read -p "Chọn IP bind (0=Tự gõ): " ip_idx
-    if [ "$ip_idx" == "0" ]; then read -p "Nhập IP: " bind_ip; else bind_ip="${IP_LIST[$((ip_idx-1))]}"; fi
+    
+    for i in "${!IP_LIST[@]}"; do
+        curr_ip="${IP_LIST[$i]}"
+        hint=""
+        # Quét các file config hiện có
+        if ls /etc/frp/frps-*.toml >/dev/null 2>&1; then
+            for f in /etc/frp/frps-*.toml; do
+                if grep -q "bindAddr = \"$curr_ip\"" "$f"; then
+                    hint="${CYAN}[Đang dùng cho Server: $(basename "$f" .toml)]${NC}"
+                fi
+            done
+        fi
+        echo -e "  ${YELLOW}$((i+1)).${NC} ${curr_ip} ${hint}"
+    done
+    
+    echo -e "  ${YELLOW}0.${NC} Tự gõ tay IP"
+    read -p "Chọn IP [0-${#IP_LIST[@]}]: " ip_idx
+    if [ "$ip_idx" == "0" ] || [ -z "$ip_idx" ]; then 
+        read -p "Nhập IP: " bind_ip
+    else 
+        bind_ip="${IP_LIST[$((ip_idx-1))]}"
+    fi
     
     while true; do
         read -p "Control Port [7000]: " ctrl_port; ctrl_port=${ctrl_port:-7000}
