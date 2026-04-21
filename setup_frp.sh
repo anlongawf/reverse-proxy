@@ -231,10 +231,12 @@ get_client_common_info() {
     done
 
     echo -e "\n${YELLOW}--- Khởi tạo IP Ảo (Dummy IP) cho Node ---${NC}"
-    echo "Dải IP nội bộ: 192.168.254.X"
-    read -p "Nhập SỐ CUỐI (X) cho IP ảo (1-254) [Mặc định: 1]: " ip_octet
-    ip_octet=${ip_octet:-1}
-    DUMMY_IP="192.168.254.${ip_octet}"
+    while true; do
+        read -p "Nhập full IP ảo muốn dùng (Ví dụ 192.168.1.10) [Mặc định: 192.168.254.1]: " DUMMY_IP
+        DUMMY_IP=${DUMMY_IP:-192.168.254.1}
+        if [[ $DUMMY_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; fi
+        echo -e "${RED}Định dạng IP không hợp lệ!${NC}"
+    done
 }
 
 # ==============================================
@@ -461,7 +463,7 @@ if [ "$choice" == "4" ]; then
     SERVICES="${SERVICES} frps.service frpc.service pterodactyl-dummy-ip.service"
 
     for svc in ${SERVICES}; do
-        if [ -f "/etc/systemd/system/${svc}" ] || [ -f "/lib/systemd/system/${svc}" ]; then
+        if [ -f "/etc/systemd/system/${svc}" ]; then
             echo "  - Đang dừng ${svc}..."
             systemctl stop "${svc}" 2>/dev/null
             systemctl disable "${svc}" 2>/dev/null
@@ -473,13 +475,17 @@ if [ "$choice" == "4" ]; then
     systemctl daemon-reload
     systemctl reset-failed
 
-    echo -e "${YELLOW}>> Đang gỡ bỏ binary và cấu hình...${NC}"
-    rm -f /usr/local/bin/frps /usr/local/bin/frpc
+    echo -e "${YELLOW}>> Đang gỡ bỏ cấu hình và binary...${NC}"
     rm -rf /etc/frp
+    # Chỉ xoá binary nếu không dùng cho việc khác
+    read -p "Có xoá luôn file chạy /usr/local/bin/frp* không? (y/N): " del_bin
+    if [[ "$del_bin" =~ ^[Yy]$ ]]; then
+        rm -f /usr/local/bin/frps /usr/local/bin/frpc
+    fi
     
-    echo -e "${YELLOW}>> Đang dọn dẹp các IP ảo trên loopback (192.168.254.X)...${NC}"
-    # Xoá tất cả IP trong dải dummy 192.168.254.0/24 trên interface lo
-    ip addr show dev lo | grep "192.168.254." | awk '{print $2}' | while read -r ip_cidr; do
+    echo -e "${YELLOW}>> Đang dọn dẹp các IP ảo trên loopback...${NC}"
+    # Xoá tất cả IP ảo mà script này thường tạo (X.X.X.X/32 trên lo)
+    ip addr show dev lo | grep "/32" | awk '{print $2}' | while read -r ip_cidr; do
         echo "  - Đang gỡ IP: ${ip_cidr}"
         ip addr del "${ip_cidr}" dev lo 2>/dev/null
     done
