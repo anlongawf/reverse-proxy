@@ -75,6 +75,7 @@ type = "tcp"
 localIP = "${dip}"
 localPort = ${p}
 remotePort = ${p}
+transport.proxyProtocolVersion = "v2"
 
 [[proxies]]
 name = "${prefix}-udp-${p}"
