@@ -1,11 +1,12 @@
 #!/bin/bash
 
 # ======================================================
-# AUTO SETUP MINECRAFT FRP TUNNEL — V12
+# AUTO SETUP MINECRAFT FRP TUNNEL — V12.3
 # ======================================================
 # Fixes: proxy name collision, port conflict, proxy protocol
 #        toggle per-range, webServer hot-reload, uninstall bugs,
 #        dummy IP cleanup, UDP never gets PP, summary after install
+#        firewall auto-open, reload version-aware, append mode
 # ======================================================
 
 RED='\033[0;31m'
@@ -204,6 +205,42 @@ show_pp_warning() {
     echo -e "${RED}║  ❌ Backend KHÔNG hỗ trợ PP → Player KHÔNG vào được!        ║${NC}"
     echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
 }
+# ==============================================
+# Function: Tự động mở port trên firewall
+# Hỗ trợ: ufw, firewalld, iptables
+# ==============================================
+firewall_open_port() {
+    local port=$1
+    local proto=${2:-tcp}  # mặc định tcp
+
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw allow "${port}/${proto}" >/dev/null 2>&1
+        echo -e "${GREEN}   [UFW] Đã mở ${port}/${proto}${NC}"
+    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1
+        echo -e "${GREEN}   [FirewallD] Đã mở ${port}/${proto}${NC}"
+        FIREWALLD_RELOAD=1
+    elif command -v iptables >/dev/null 2>&1; then
+        # Tránh duplicate rule
+        if ! iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
+            iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
+            echo -e "${GREEN}   [iptables] Đã mở ${port}/${proto}${NC}"
+        fi
+    fi
+}
+
+# Detect firewall đang chạy
+detect_firewall() {
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        echo "ufw"
+    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        echo "firewalld"
+    elif command -v iptables >/dev/null 2>&1; then
+        echo "iptables"
+    else
+        echo "none"
+    fi
+}
 
 # ==============================================
 # MENU CHÍNH
@@ -211,7 +248,7 @@ show_pp_warning() {
 clear
 echo -e "${GREEN}${BOLD}=======================================${NC}"
 echo -e "${GREEN}${BOLD}   AUTO SETUP MINECRAFT FRP TUNNEL     ${NC}"
-echo -e "${GREEN}${BOLD}   V12                                 ${NC}"
+echo -e "${GREEN}${BOLD}   V12.3                               ${NC}"
 echo -e "${GREEN}${BOLD}=======================================${NC}"
 echo "1. Cài đặt FRP SERVER"
 echo "2. Cài đặt FRP CLIENT"
@@ -261,6 +298,14 @@ if [ "$choice" == "1" ]; then
     fi
 
     install_frp_core
+
+    # --- Mở firewall cho Control Port ---
+    FW=$(detect_firewall)
+    if [ "$FW" != "none" ]; then
+        echo -e "${CYAN}>> Đang mở firewall cho Control Port ${ctrl_port}...${NC}"
+        firewall_open_port "$ctrl_port" "tcp"
+        [ "${FIREWALLD_RELOAD:-0}" -eq 1 ] && firewall-cmd --reload >/dev/null 2>&1 && FIREWALLD_RELOAD=0
+    fi
 
     CONF="/etc/frp/frps-${bind_ip//./-}.toml"
     cat > "$CONF" <<EOF
@@ -366,7 +411,33 @@ EOF
     SVC="frpc-${DUMMY_IP//./-}"
     CONF="/etc/frp/${SVC}.toml"
 
-    cat > "$CONF" <<EOF
+    MODE="install"  # mặc định: cài mới
+
+    if [ -f "$CONF" ]; then
+        echo -e ""
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║  ⚠️  Đã tìm thấy config cho IP ${DUMMY_IP}       ${NC}"
+        echo -e "${YELLOW}║  File: ${CONF}${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo "  1. Thêm port mới vào config hiện tại (giữ nguyên port cũ)"
+        echo "  2. Ghi đè toàn bộ (xoá config cũ, nhập lại từ đầu)"
+        echo "  0. Huỷ"
+        read -p "Chọn: " overwrite_choice
+
+        case "$overwrite_choice" in
+            1) MODE="append" ;;
+            2) MODE="overwrite" ;;
+            *)
+                echo -e "${YELLOW}>> Đã huỷ.${NC}"
+                exit 0
+                ;;
+        esac
+    fi
+
+    if [ "$MODE" == "overwrite" ] || [ "$MODE" == "install" ]; then
+        # Ghi mới hoàn toàn
+        cat > "$CONF" <<EOF
 serverAddr = "${vps_ip}"
 serverPort = ${ctrl_port}
 
@@ -378,12 +449,65 @@ token = "${auth_token}"
 addr = "127.0.0.1"
 port = ${WS_PORT}
 EOF
+        for r in "${CUSTOM_RANGES[@]}"; do
+            IFS=':' read -r ps pe use_pp <<< "$r"
+            append_proxies "mc" "$ps" "$pe" "$DUMMY_IP" "$CONF" "$use_pp"
+        done
 
-    # Ghi các proxy
-    for r in "${CUSTOM_RANGES[@]}"; do
-        IFS=':' read -r ps pe use_pp <<< "$r"
-        append_proxies "mc" "$ps" "$pe" "$DUMMY_IP" "$CONF" "$use_pp"
-    done
+    elif [ "$MODE" == "append" ]; then
+        # Chỉ append thêm proxy mới vào cuối file, không đụng header
+        echo -e "${CYAN}>> Đang thêm port mới vào config hiện tại...${NC}"
+
+        # Đọc các port đã có để warn overlap
+        EXISTING_PORTS=$(grep "^remotePort" "$CONF" | awk '{print $3}' | sort -n)
+        APPEND_COUNT=0
+
+        for r in "${CUSTOM_RANGES[@]}"; do
+            IFS=':' read -r ps pe use_pp <<< "$r"
+            for p in $(seq "$ps" "$pe"); do
+                # Check xem port này đã có chưa (tcp)
+                if grep -q "name = \"mc-${DUMMY_IP//./-}-tcp-${p}\"" "$CONF"; then
+                    echo -e "${YELLOW}   >> Port ${p} đã tồn tại trong config, bỏ qua.${NC}"
+                    continue
+                fi
+                append_proxies "mc" "$p" "$p" "$DUMMY_IP" "$CONF" "$use_pp"
+                APPEND_COUNT=$((APPEND_COUNT + 1))
+            done
+        done
+
+        echo -e "${GREEN}>> Đã thêm ${APPEND_COUNT} port mới vào config.${NC}"
+
+        # Reload thay vì restart để không kick player
+        echo -e "${CYAN}>> Đang reload frpc (không kick player)...${NC}"
+        FRP_VER_R=$(/usr/local/bin/frpc --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1)
+        FRP_MAJ_R=$(echo "$FRP_VER_R" | cut -d. -f1)
+        FRP_MIN_R=$(echo "$FRP_VER_R" | cut -d. -f2)
+        FRP_MAJ_R=${FRP_MAJ_R:-0}
+        FRP_MIN_R=${FRP_MIN_R:-0}
+        if [ "$FRP_MAJ_R" -ge 1 ] || [ "$FRP_MIN_R" -ge 52 ]; then
+            /usr/local/bin/frpc reload -c "$CONF" &&                 echo -e "${GREEN}>> Reload thành công!${NC}" ||                 echo -e "${YELLOW}>> Reload thất bại, thử restart service...${NC}" &&                 systemctl restart "$SVC"
+        else
+            WS_PORT_R=$(grep "^port = " "$CONF" | head -1 | awk '{print $3}')
+            /usr/local/bin/frpc reload --server_addr 127.0.0.1 --server_port "${WS_PORT_R}" &&                 echo -e "${GREEN}>> Reload thành công!${NC}" ||                 echo -e "${YELLOW}>> Reload thất bại, thử restart service...${NC}" &&                 systemctl restart "$SVC"
+        fi
+    fi
+
+    # --- Mở firewall cho tất cả dải port đã cấu hình ---
+    FW=$(detect_firewall)
+    if [ "$FW" != "none" ]; then
+        echo -e "${CYAN}>> Đang mở firewall cho các port đã cấu hình...${NC}"
+        for r in "${CUSTOM_RANGES[@]}"; do
+            IFS=':' read -r ps pe use_pp_fw <<< "$r"
+            for p in $(seq "$ps" "$pe"); do
+                firewall_open_port "$p" "tcp"
+                firewall_open_port "$p" "udp"
+            done
+        done
+        [ "${FIREWALLD_RELOAD:-0}" -eq 1 ] && firewall-cmd --reload >/dev/null 2>&1 && FIREWALLD_RELOAD=0
+        echo -e "${GREEN}>> Firewall đã được cập nhật.${NC}"
+    else
+        echo -e "${YELLOW}>> Không phát hiện firewall đang hoạt động, bỏ qua bước mở port.${NC}"
+    fi
 
     cat > "/etc/systemd/system/${SVC}.service" <<EOF
 [Unit]
@@ -410,8 +534,22 @@ EOF
     echo -e "${GREEN}   Config         : ${CONF}${NC}"
     echo -e "${GREEN}   WebServer port : ${WS_PORT}${NC}"
     echo -e ""
+    # Detect FRP version để in đúng lệnh reload
+    FRP_VER=$(/usr/local/bin/frpc --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1)
+    FRP_MAJOR=$(echo "$FRP_VER" | cut -d. -f1)
+    FRP_MINOR=$(echo "$FRP_VER" | cut -d. -f2)
+    FRP_MAJOR=${FRP_MAJOR:-0}
+    FRP_MINOR=${FRP_MINOR:-0}
+
     echo -e "${CYAN}${BOLD}>> Lệnh hot-reload (không kick player):${NC}"
-    echo -e "${CYAN}   frpc reload --server_addr 127.0.0.1 --server_port ${WS_PORT}${NC}"
+    # v0.52+ hỗ trợ "frpc reload -c <file>" — gọn và chắc chắn hơn
+    if [ "$FRP_MAJOR" -ge 1 ] || ( [ "$FRP_MAJOR" -eq 0 ] && [ "$FRP_MINOR" -ge 52 ] ); then
+        echo -e "${CYAN}   frpc reload -c ${CONF}${NC}"
+        echo -e "${YELLOW}   (FRP v${FRP_VER} — dùng syntax mới -c)${NC}"
+    else
+        echo -e "${CYAN}   frpc reload --server_addr 127.0.0.1 --server_port ${WS_PORT}${NC}"
+        echo -e "${YELLOW}   (FRP v${FRP_VER} — dùng syntax cũ; nâng lên v0.52+ để dùng lệnh ngắn hơn)${NC}"
+    fi
     echo -e ""
     echo -e "${CYAN}>> Dải port đã cấu hình:${NC}"
     for r in "${CUSTOM_RANGES[@]}"; do
