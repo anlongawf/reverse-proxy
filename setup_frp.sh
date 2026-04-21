@@ -102,8 +102,14 @@ if [ "$choice" == "1" ]; then
     mapfile -t IP_LIST < <(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
     for i in "${!IP_LIST[@]}"; do
         curr_ip="${IP_LIST[$i]}"
-        hint=""; [ -f "/etc/frp/frps-${curr_ip}.toml" ] && hint="${CYAN}[Đang dùng]${NC}"
-        echo -e "  $((i+1)). ${curr_ip} ${hint}"
+        hint=""
+        # Quét thông minh: Tìm trong toàn bộ file toml xem có IP này không
+        if ls /etc/frp/*.toml >/dev/null 2>&1; then
+            if grep -rqlE "bindAddr = \"$curr_ip\"|localIP = \"$curr_ip\"" /etc/frp/*.toml >/dev/null 2>&1; then
+                hint="${CYAN}[Đang dùng]${NC}"
+            fi
+        fi
+        echo -e "  ${YELLOW}$((i+1)).${NC} ${curr_ip} ${hint}"
     done
     read -p "Chọn IP [0=Tự gõ]: " ip_idx
     if [ "$ip_idx" == "0" ]; then read -p "IP: " bind_ip; else bind_ip="${IP_LIST[$((ip_idx-1))]}"; fi
