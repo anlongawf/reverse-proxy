@@ -15,8 +15,10 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then FRP_ARCH="amd64"; elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then FRP_ARCH="arm64"; else echo -e "${RED}CPU không hỗ trợ${NC}"; exit 1; fi
+
+# Luôn đảm bảo thư mục cấu hình tồn tại
+mkdir -p /etc/frp
 
 # ---------------------------------------------
 # Function: Cài đặt binary FRP
