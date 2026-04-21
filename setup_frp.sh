@@ -313,6 +313,13 @@ if [ "$choice" == "2" ]; then
         exit 1
     fi
 
+    # Validate Dummy IP — phải đúng format IPv4 thuần số
+    if [[ ! "$DUMMY_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}>> Lỗi: Dummy IP '${DUMMY_IP}' không hợp lệ.${NC}"
+        echo -e "${RED}   Phải là dạng x.x.x.x (ví dụ: 192.168.1.36)${NC}"
+        exit 1
+    fi
+
     get_custom_ranges
 
     if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then
@@ -337,7 +344,7 @@ ExecStart=/sbin/ip addr add ${DUMMY_IP}/32 dev lo
 ExecStop=/sbin/ip addr del ${DUMMY_IP}/32 dev lo
 
 [Install]
-WantedBy=sysinit.target
+WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable --now "$D_SVC"
