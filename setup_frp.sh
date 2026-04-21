@@ -103,10 +103,11 @@ if [ "$choice" == "1" ]; then
     for i in "${!IP_LIST[@]}"; do
         curr_ip="${IP_LIST[$i]}"
         hint=""
-        # Quét thông minh: Tìm trong toàn bộ file toml xem có IP này không
+        # Quét thông minh: Hiện luôn tên file đang dùng IP này
         if ls /etc/frp/*.toml >/dev/null 2>&1; then
-            if grep -rqlE "bindAddr = \"$curr_ip\"|localIP = \"$curr_ip\"" /etc/frp/*.toml >/dev/null 2>&1; then
-                hint="${CYAN}[Đang dùng]${NC}"
+            file_using=$(grep -rlE "bindAddr = \"$curr_ip\"|localIP = \"$curr_ip\"" /etc/frp/*.toml | xargs -n1 basename 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+            if [ -n "$file_using" ]; then
+                hint="${CYAN}[File: $file_using]${NC}"
             fi
         fi
         echo -e "  ${YELLOW}$((i+1)).${NC} ${curr_ip} ${hint}"
