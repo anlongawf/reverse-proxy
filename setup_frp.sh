@@ -67,10 +67,11 @@ get_custom_ranges() {
 # ---------------------------------------------
 append_proxies() {
     local prefix=$1; local p_s=$2; local p_e=$3; local dip=$4; local target=$5
+    local dip_dash="${dip//./-}"
     for p in $(seq $p_s $p_e); do
         cat >> "$target" <<EOF
 [[proxies]]
-name = "${prefix}-tcp-${p}"
+name = "${prefix}-${dip_dash}-tcp-${p}"
 type = "tcp"
 localIP = "${dip}"
 localPort = ${p}
@@ -78,7 +79,7 @@ remotePort = ${p}
 transport.proxyProtocolVersion = "v2"
 
 [[proxies]]
-name = "${prefix}-udp-${p}"
+name = "${prefix}-${dip_dash}-udp-${p}"
 type = "udp"
 localIP = "${dip}"
 localPort = ${p}
