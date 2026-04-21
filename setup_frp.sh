@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ======================================================
-# AUTO SETUP MINECRAFT FRP TUNNEL — V12.3
+# AUTO SETUP MINECRAFT FRP TUNNEL — V12.4
 # ======================================================
 # Fixes: proxy name collision, port conflict, proxy protocol
 #        toggle per-range, webServer hot-reload, uninstall bugs,
@@ -46,11 +46,11 @@ install_frp_core() {
     VERSION_NUM=${LATEST_RELEASE#v}
     DOWNLOAD_URL="https://github.com/fatedier/frp/releases/download/${LATEST_RELEASE}/frp_${VERSION_NUM}_linux_${FRP_ARCH}.tar.gz"
     wget -q --show-progress "$DOWNLOAD_URL" -O "/tmp/frp.tar.gz"
-    cd /tmp && tar -xzf frp.tar.gz
+    tar -xzf /tmp/frp.tar.gz -C /tmp
     FRP_DIR="frp_${VERSION_NUM}_linux_${FRP_ARCH}"
     mkdir -p /etc/frp
-    cp "$FRP_DIR/frps" /usr/local/bin/frps
-    cp "$FRP_DIR/frpc" /usr/local/bin/frpc
+    cp "/tmp/${FRP_DIR}/frps" /usr/local/bin/frps
+    cp "/tmp/${FRP_DIR}/frpc" /usr/local/bin/frpc
     chmod +x /usr/local/bin/frp*
     echo -e "${GREEN}>> Cài đặt binary FRP thành công (v${VERSION_NUM}).${NC}"
 }
@@ -248,7 +248,7 @@ detect_firewall() {
 clear
 echo -e "${GREEN}${BOLD}=======================================${NC}"
 echo -e "${GREEN}${BOLD}   AUTO SETUP MINECRAFT FRP TUNNEL     ${NC}"
-echo -e "${GREEN}${BOLD}   V12.3                               ${NC}"
+echo -e "${GREEN}${BOLD}   V12.4                               ${NC}"
 echo -e "${GREEN}${BOLD}=======================================${NC}"
 echo "1. Cài đặt FRP SERVER"
 echo "2. Cài đặt FRP CLIENT"
@@ -365,6 +365,33 @@ if [ "$choice" == "2" ]; then
         exit 1
     fi
 
+    SVC="frpc-${DUMMY_IP//./-}"
+    CONF="/etc/frp/${SVC}.toml"
+
+    MODE="install"  # mặc định: cài mới
+
+    if [ -f "$CONF" ]; then
+        echo -e ""
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║  ⚠️  Đã tìm thấy config cho IP ${DUMMY_IP}${NC}"
+        echo -e "${YELLOW}║  File: ${CONF}${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo "  1. Thêm port mới vào config hiện tại (giữ nguyên port cũ)"
+        echo "  2. Ghi đè toàn bộ (xoá config cũ, nhập lại từ đầu)"
+        echo "  0. Huỷ"
+        read -p "Chọn: " overwrite_choice
+
+        case "$overwrite_choice" in
+            1) MODE="append" ;;
+            2) MODE="overwrite" ;;
+            *)
+                echo -e "${YELLOW}>> Đã huỷ.${NC}"
+                exit 0
+                ;;
+        esac
+    fi
+
     get_custom_ranges
 
     if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then
@@ -403,36 +430,9 @@ EOF
     WS_PORT=$((7400 + LAST_OCTET))
 
     # Kiểm tra xem WS_PORT đã bị dùng chưa
-    if ss -tlnp 2>/dev/null | grep -q ":${WS_PORT} " || grep -r "webServer.port = ${WS_PORT}" /etc/frp/*.toml 2>/dev/null | grep -v "^$" | grep -q .; then
+    if ss -tlnp 2>/dev/null | grep -q ":${WS_PORT} " || grep -r "^port = ${WS_PORT}$" /etc/frp/*.toml 2>/dev/null | grep -v "^$" | grep -q .; then
         echo -e "${YELLOW}>> Cảnh báo: WebServer port ${WS_PORT} có thể đã được dùng bởi instance khác!${NC}"
         echo -e "${YELLOW}   Kiểm tra lại nếu có lỗi reload.${NC}"
-    fi
-
-    SVC="frpc-${DUMMY_IP//./-}"
-    CONF="/etc/frp/${SVC}.toml"
-
-    MODE="install"  # mặc định: cài mới
-
-    if [ -f "$CONF" ]; then
-        echo -e ""
-        echo -e "${YELLOW}╔══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${YELLOW}║  ⚠️  Đã tìm thấy config cho IP ${DUMMY_IP}       ${NC}"
-        echo -e "${YELLOW}║  File: ${CONF}${NC}"
-        echo -e "${YELLOW}╚══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        echo "  1. Thêm port mới vào config hiện tại (giữ nguyên port cũ)"
-        echo "  2. Ghi đè toàn bộ (xoá config cũ, nhập lại từ đầu)"
-        echo "  0. Huỷ"
-        read -p "Chọn: " overwrite_choice
-
-        case "$overwrite_choice" in
-            1) MODE="append" ;;
-            2) MODE="overwrite" ;;
-            *)
-                echo -e "${YELLOW}>> Đã huỷ.${NC}"
-                exit 0
-                ;;
-        esac
     fi
 
     if [ "$MODE" == "overwrite" ] || [ "$MODE" == "install" ]; then
@@ -458,15 +458,13 @@ EOF
         # Chỉ append thêm proxy mới vào cuối file, không đụng header
         echo -e "${CYAN}>> Đang thêm port mới vào config hiện tại...${NC}"
 
-        # Đọc các port đã có để warn overlap
-        EXISTING_PORTS=$(grep "^remotePort" "$CONF" | awk '{print $3}' | sort -n)
         APPEND_COUNT=0
 
         for r in "${CUSTOM_RANGES[@]}"; do
             IFS=':' read -r ps pe use_pp <<< "$r"
             for p in $(seq "$ps" "$pe"); do
                 # Check xem port này đã có chưa (tcp)
-                if grep -q "name = \"mc-${DUMMY_IP//./-}-tcp-${p}\"" "$CONF"; then
+                if grep -q "name = "mc-${DUMMY_IP//./-}-tcp-${p}"" "$CONF"; then
                     echo -e "${YELLOW}   >> Port ${p} đã tồn tại trong config, bỏ qua.${NC}"
                     continue
                 fi
@@ -482,13 +480,21 @@ EOF
         FRP_VER_R=$(/usr/local/bin/frpc --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1)
         FRP_MAJ_R=$(echo "$FRP_VER_R" | cut -d. -f1)
         FRP_MIN_R=$(echo "$FRP_VER_R" | cut -d. -f2)
-        FRP_MAJ_R=${FRP_MAJ_R:-0}
-        FRP_MIN_R=${FRP_MIN_R:-0}
-        if [ "$FRP_MAJ_R" -ge 1 ] || [ "$FRP_MIN_R" -ge 52 ]; then
-            /usr/local/bin/frpc reload -c "$CONF" &&                 echo -e "${GREEN}>> Reload thành công!${NC}" ||                 echo -e "${YELLOW}>> Reload thất bại, thử restart service...${NC}" &&                 systemctl restart "$SVC"
+        if [ -n "$FRP_MIN_R" ] && { [ "$FRP_MAJ_R" -ge 1 ] || [ "$FRP_MIN_R" -ge 52 ]; }; then
+            if /usr/local/bin/frpc reload -c "$CONF"; then
+                echo -e "${GREEN}>> Reload thành công!${NC}"
+            else
+                echo -e "${YELLOW}>> Reload thất bại, thử restart service...${NC}"
+                systemctl restart "$SVC"
+            fi
         else
             WS_PORT_R=$(grep "^port = " "$CONF" | head -1 | awk '{print $3}')
-            /usr/local/bin/frpc reload --server_addr 127.0.0.1 --server_port "${WS_PORT_R}" &&                 echo -e "${GREEN}>> Reload thành công!${NC}" ||                 echo -e "${YELLOW}>> Reload thất bại, thử restart service...${NC}" &&                 systemctl restart "$SVC"
+            if /usr/local/bin/frpc reload --server_addr 127.0.0.1 --server_port "${WS_PORT_R}"; then
+                echo -e "${GREEN}>> Reload thành công!${NC}"
+            else
+                echo -e "${YELLOW}>> Reload thất bại, thử restart service...${NC}"
+                systemctl restart "$SVC"
+            fi
         fi
     fi
 
@@ -523,8 +529,12 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable --now "$SVC"
+    # Chỉ start/enable service khi cài mới hoặc ghi đè
+    # Append mode đã reload ở trên, không cần restart
+    if [ "$MODE" != "append" ]; then
+        systemctl daemon-reload
+        systemctl enable --now "$SVC"
+    fi
 
     echo -e ""
     echo -e "${GREEN}${BOLD}>> CLIENT ĐÃ CHẠY!${NC}"
@@ -538,12 +548,10 @@ EOF
     FRP_VER=$(/usr/local/bin/frpc --version 2>/dev/null | grep -oP '\d+\.\d+' | head -1)
     FRP_MAJOR=$(echo "$FRP_VER" | cut -d. -f1)
     FRP_MINOR=$(echo "$FRP_VER" | cut -d. -f2)
-    FRP_MAJOR=${FRP_MAJOR:-0}
-    FRP_MINOR=${FRP_MINOR:-0}
 
     echo -e "${CYAN}${BOLD}>> Lệnh hot-reload (không kick player):${NC}"
     # v0.52+ hỗ trợ "frpc reload -c <file>" — gọn và chắc chắn hơn
-    if [ "$FRP_MAJOR" -ge 1 ] || ( [ "$FRP_MAJOR" -eq 0 ] && [ "$FRP_MINOR" -ge 52 ] ); then
+    if [ -n "$FRP_MINOR" ] && [ "$FRP_MAJOR" -ge 1 ] ||        ( [ "$FRP_MAJOR" -eq 0 ] && [ "$FRP_MINOR" -ge 52 ] ); then
         echo -e "${CYAN}   frpc reload -c ${CONF}${NC}"
         echo -e "${YELLOW}   (FRP v${FRP_VER} — dùng syntax mới -c)${NC}"
     else
