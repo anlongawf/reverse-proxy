@@ -190,9 +190,10 @@ append_proxies() {
     local port_start=$2
     local port_end=$3
     local dummy_ip=$4
+    local target_file=$5
 
     for port in $(seq $port_start $port_end); do
-        cat >> /etc/frp/frpc.toml <<EOF
+        cat >> "${target_file}" <<EOF
 [[proxies]]
 name = "${prefix}-tcp-${port}"
 type = "tcp"
@@ -425,12 +426,12 @@ auth.token = "${auth_token}"
 EOF
 
     # Minecraft mặc định: 25565-25568 + 19132 (TCP+UDP)
-    append_proxies "mc" 25565 25568 "${DUMMY_IP}"
-    append_proxies "mc" 19132 19132 "${DUMMY_IP}"
+    append_proxies "mc" 25565 25568 "${DUMMY_IP}" "${FRPC_CONFIG}"
+    append_proxies "mc" 19132 19132 "${DUMMY_IP}" "${FRPC_CONFIG}"
 
     # Custom range nếu có
     if [[ "$add_range" =~ ^[Yy]$ ]]; then
-        append_proxies "mc" $custom_start $custom_end "${DUMMY_IP}"
+        append_proxies "mc" $custom_start $custom_end "${DUMMY_IP}" "${FRPC_CONFIG}"
     fi
 
     setup_frpc_service
