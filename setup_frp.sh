@@ -47,6 +47,11 @@ fi
 # Function: Cài đặt binary FRP
 # ---------------------------------------------
 install_frp_core() {
+    if [ -f "/usr/local/bin/frps" ] && [ -f "/usr/local/bin/frpc" ]; then
+        echo -e "${GREEN}>> Lõi FRP đã có sẵn, bỏ qua bước cài đặt để không làm gián đoạn các cụm đang chạy.${NC}"
+        return 0
+    fi
+
     echo -e "${YELLOW}>> Đang lấy phiên bản FRP mới nhất từ GitHub...${NC}"
     LATEST_RELEASE=$(curl -s https://api.github.com/repos/fatedier/frp/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [ -z "$LATEST_RELEASE" ]; then
@@ -66,7 +71,7 @@ install_frp_core() {
 
     mkdir -p /etc/frp
 
-    # Ghi nhớ các service đang chạy để bật lại sau
+    # Ghi nhớ các service đang chạy để bật lại sau (chỉ khi thực sự cần update)
     RUNNING_SERVICES=$(systemctl list-units --type=service --state=running --no-legend | grep -oE 'frp[sc]-[^ ]+')
     
     if [ -n "$RUNNING_SERVICES" ]; then
@@ -84,7 +89,7 @@ install_frp_core() {
     fi
 
     rm -rf "/tmp/frp.tar.gz" "/tmp/$FRP_DIR"
-    echo -e "${GREEN}>> Cài đặt binary FRP thành công.${NC}"
+    echo -e "${GREEN}>> Cập nhật lõi FRP thành công.${NC}"
 }
 
 # ---------------------------------------------
