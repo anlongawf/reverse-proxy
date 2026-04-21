@@ -196,32 +196,16 @@ apply_firewall() {
 # ---------------------------------------------
 # Function: Ghi proxies TCP+UDP vào frpc.toml
 # ---------------------------------------------
-append_proxies() {
-    local prefix=$1
-    local port_start=$2
-    local port_end=$3
-    local dummy_ip=$4
-    local target_file=$5
-
-    for port in $(seq $port_start $port_end); do
-        cat >> "${target_file}" <<EOF
-[[proxies]]
-name = "${prefix}-tcp-${port}"
-type = "tcp"
-localIP = "${dummy_ip}"
-localPort = ${port}
-remotePort = ${port}
-
-[[proxies]]
-name = "${prefix}-udp-${port}"
-type = "udp"
-localIP = "${dummy_ip}"
-localPort = ${port}
-remotePort = ${port}
-
-EOF
-    done
+append_proxies_server() {
+    local port_start=$1
+    local port_end=$2
+    local target_file=$3
+    # Note: Server config for 0.52+ might not need proxy definitions, 
+    # but some users prefer to restrict ports via allowPorts.
+    # Currently we open firewall instead.
+    return 0
 }
+
 
 # ---------------------------------------------
 # Function: Nhập thông tin kết nối Client
@@ -337,15 +321,16 @@ if [ "$choice" == "1" ]; then
 
     install_frp_core
 
-    # --- Ghi frps.toml ---
+    # --- Ghi frps config ---
+    FRPS_CONFIG="/etc/frp/frps-${bind_ip:-main}.toml"
     if [ -n "$bind_ip" ]; then
-        cat > /etc/frp/frps.toml <<EOF
+        cat > "${FRPS_CONFIG}" <<EOF
 bindAddr = "${bind_ip}"
 bindPort = ${ctrl_port}
 auth.token = "${auth_token}"
 EOF
     else
-        cat > /etc/frp/frps.toml <<EOF
+        cat > "${FRPS_CONFIG}" <<EOF
 bindPort = ${ctrl_port}
 auth.token = "${auth_token}"
 EOF
@@ -364,7 +349,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/frps -c /etc/frp/frps.toml
+ExecStart=/usr/local/bin/frps -c ${FRPS_CONFIG}
 Restart=on-failure
 RestartSec=5s
 
