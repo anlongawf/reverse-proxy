@@ -66,12 +66,22 @@ install_frp_core() {
 
     mkdir -p /etc/frp
 
-    # Dừng tất cả frps/frpc service trước khi ghi đè binary tránh lỗi "Text file busy"
-    systemctl stop $(systemctl list-units --type=service --state=running --no-legend | grep -oE 'frp[sc]-[^ ]+') 2>/dev/null || true
+    # Ghi nhớ các service đang chạy để bật lại sau
+    RUNNING_SERVICES=$(systemctl list-units --type=service --state=running --no-legend | grep -oE 'frp[sc]-[^ ]+')
+    
+    if [ -n "$RUNNING_SERVICES" ]; then
+        echo -e "${YELLOW}>> Đang tạm dừng các cụm để cập nhật...${NC}"
+        systemctl stop $RUNNING_SERVICES 2>/dev/null || true
+    fi
 
     cp "$FRP_DIR/frps" /usr/local/bin/
     cp "$FRP_DIR/frpc" /usr/local/bin/
     chmod +x /usr/local/bin/frps /usr/local/bin/frpc
+
+    if [ -n "$RUNNING_SERVICES" ]; then
+        echo -e "${YELLOW}>> Đang khởi động lại các cụm cũ...${NC}"
+        systemctl start $RUNNING_SERVICES 2>/dev/null || true
+    fi
 
     rm -rf "/tmp/frp.tar.gz" "/tmp/$FRP_DIR"
     echo -e "${GREEN}>> Cài đặt binary FRP thành công.${NC}"
