@@ -31,48 +31,82 @@ curl -sL https://raw.githubusercontent.com/anlongawf/reverse-proxy/main/setup_fr
 
 ## 📖 Hướng dẫn chi tiết từng bước
 
-### Bước 1: Cài đặt FRP Server (Trên VPS)
-Đây là máy chủ trung gian có IP công khai.
+## 🖥️ Mô phỏng cài đặt thực tế (Step-by-Step)
 
-1.  Mở script và chọn **Option 1** (`Cài đặt FRP SERVER`).
-2.  **Chọn IP**: Script sẽ liệt kê các IP hiện có, chọn IP Public của VPS.
-3.  **Control Port**: Mặc định là `7000`. Đây là port để Client kết nối tới.
-4.  **Auth Token**: Nhập mật khẩu bảo mật (sẽ được ẩn khi nhập).
-5.  **Hoàn tất**: Script tự động cài Core, tạo Service và mở Firewall port 7000.
+### 1. Cài đặt trên VPS (Server)
+Đây là ví dụ khi bạn chạy script trên VPS và chọn Option 1:
 
-### Bước 2: Cài đặt FRP Client (Trên máy tính chạy Game)
-Đây là máy đang chạy Server Minecraft (Home PC, máy ảo, v.v.).
+```text
+=======================================
+   AUTO SETUP MINECRAFT FRP TUNNEL     
+   V13.0                               
+=======================================
+1. Cài đặt FRP SERVER
+2. Cài đặt FRP CLIENT
+4. GỠ CÀI ĐẶT
+0. Thoát
 
-1.  Mở script và chọn **Option 2** (`Cài đặt FRP CLIENT`).
-2.  **IP VPS**: Nhập IP của máy VPS ở Bước 1.
-3.  **Control Port & Token**: Nhập y hệt thông tin đã cài trên VPS.
-4.  **Dummy IP**: Nhập IP ảo (ví dụ: `192.168.254.1`). Đây là IP bạn sẽ dùng để bind trong config Minecraft.
-5.  **Cấu hình Port**:
-    -   Nhập dải port (Ví dụ: `25565-25565`).
-    -   Chọn có bật **Proxy Protocol** hay không (Chỉ bật nếu dùng BungeeCord/Velocity).
-6.  **Hoàn tất**: Script tạo IP ảo, kết nối tunnel và tạo service khởi động cùng máy.
+Lựa chọn: 1
+
+--- Chọn IP để bind FRP Server ---
+  1. 103.178.235.70
+Chọn IP [0=Tự gõ]: 1
+Control Port [7000]: 7000
+Auth Token: ******** (Nhập mật khẩu của bạn)
+
+>> Đang cài đặt binary FRP mới nhất...
+>> Đã mở firewall cho Control Port 7000...
+>> SERVER ĐÃ CHẠY!
+   Service : frps-103-178-235-70
+   Config  : /etc/frp/frps-103-178-235-70.toml
+```
+
+### 2. Cài đặt trên máy nội bộ (Client)
+Đây là ví dụ mô phỏng kịch bản A (Mở port 25565 cho Paper/Spigot):
+
+```text
+Lựa chọn: 2
+IP VPS (FRP Server): 103.178.235.70
+Control Port: 7000
+Auth Token: ******** (Nhập mật khẩu y hệt như trên VPS)
+IP local của Node này (Dummy IP) [192.168.254.1]: 192.168.254.1
+
+--- Cấu hình Dải Port ---
+Thêm dải port mới? (y/N): y
+  Port bắt đầu: 25565
+  Port kết thúc: 25565
+  Bật Proxy Protocol cho dải 25565-25565? (y/N): n
+>> Đã thêm 25565-25565 [TCP+UDP, Proxy Protocol: TẮT]
+
+Thêm dải port mới? (y/N): n
+
+>> Dummy IP 192.168.254.1 đã được thêm vào loopback.
+>> CLIENT ĐÃ CHẠY!
+   Service        : frpc-192-168-254-1
+   Dummy IP       : 192.168.254.1
+   VPS Server     : 103.178.235.70:7000
+   Config         : /etc/frp/frpc-192-168-254-1.toml
+```
 
 ---
 
-## ⚡ Mô phỏng kịch bản sử dụng (Simulations)
+## ⚡ Kịch bản sử dụng (Use Cases)
 
-### Kịch bản A: Server Paper/Spigot (Java Edition)
-*   **Mục tiêu**: Mở port 25565.
-*   **Thực hiện**:
-    1.  Cài Client trên máy chạy Paper.
-    2.  Dummy IP: `192.168.254.1`.
-    3.  Port range: `25565-25565`.
-    4.  Proxy Protocol: `N` (Tắt).
-    5.  Trong `server.properties`, chỉnh: `server-ip=192.168.254.1` và `server-port=25565`.
-    6.  Người chơi vào qua: `IP_VPS:25565`.
+- **Kịch bản A: Server Paper/Spigot (Java Edition)**
+  - Dummy IP: `192.168.254.1`
+  - Port: `25565`
+  - Proxy Protocol: `N`
+  - *Cấu hình trong `server.properties`:*
+    ```properties
+    server-ip=192.168.254.1
+    server-port=25565
+    ```
+  - *Kết nối:* Người chơi vào bằng `103.178.235.70:25565`.
 
-### Kịch bản B: Cụm BungeeCord + Bedrock (Geyser)
-*   **Mục tiêu**: Bungee chạy port 25577 (muốn thấy IP thật), Geyser chạy port 19132.
-*   **Thực hiện**:
-    1.  **Dải 1**: `25577-25577`, Proxy Protocol: `Y` (Bật).
-    2.  **Dải 2**: `19132-19132`, Proxy Protocol: `N` (Tắt).
-    3.  Chỉnh `proxy_protocol: true` trong config BungeeCord.
-    4.  Người chơi Java vào qua `IP_VPS:25577`, Bedrock vào qua `IP_VPS:19132`.
+- **Kịch bản B: Cụm Proxy (Bungee/Velocity) + Bedrock**
+  - **Dải 1**: `25577` (Proxy), Proxy Protocol: `Y`.
+  - **Dải 2**: `19132` (Bedrock), Proxy Protocol: `N`.
+  - *Kết nối:* Java dùng port `25577`, Bedrock dùng port `19132`.
 
 ---
 
