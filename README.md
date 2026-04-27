@@ -1,27 +1,33 @@
-# 🚀 Auto Setup Minecraft FRP Tunnel (V13.0)
+# 🚀 Auto Setup Minecraft FRP Tunnel (V15.0)
 
-Giải pháp tự động hóa cài đặt và cấu hình **FRP (Fast Reverse Proxy)** tối ưu cho Server Minecraft. Giúp kết nối Server từ máy cá nhân (Home PC) hoặc Node nội bộ ra Internet thông qua VPS một cách nhanh chóng, bảo mật và ổn định.
+Giải pháp quản lý **FRP (Fast Reverse Proxy)** chuyên sâu cho hệ thống Minecraft Hosting (VPS + Mini PC). Phiên bản **V15.0** mang đến bước nhảy vọt về kiến trúc cô lập người dùng và bảo mật hệ thống.
 
 > [!IMPORTANT]
-> Hỗ trợ đầy đủ cho cả **Minecraft Java (TCP)** và **Minecraft Bedrock (UDP)**.
-> Tích hợp sẵn **Proxy Protocol v2** để giữ nguyên IP người chơi khi dùng BungeeCord/Velocity.
+> **V15.0 - Kiến trúc Per-User Core**: Mỗi người dùng "IP Riêng" giờ đây có một tiến trình `frps` hoàn toàn độc lập, đảm bảo hiệu suất tối đa và bảo mật tuyệt đối.
 
 ---
 
-## ✨ Tính năng nổi bật
+## ✨ Tính năng vượt trội (V15.0)
 
--   ✅ **Tự động hóa 100%**: Tự nhận diện kiến trúc CPU (amd64/arm64), tải bản FRP mới nhất.
--   ✅ **Hỗ trợ Dual-Stack**: Tự động cấu hình TCP và UDP cho mỗi port (chơi được cả Java & Bedrock).
--   ✅ **Dummy IP System**: Tạo IP ảo trên loopback để cô lập traffic, tránh xung đột port hệ thống.
--   ✅ **Hot-Reload**: Thêm/Xóa port client mà không cần restart service, không làm rớt player đang online.
--   ✅ **Firewall Automation**: Tự động mở port trên UFW, Firewalld hoặc iptables.
--   ✅ **An toàn**: Token được ẩn khi nhập, cấu hình lưu trữ chuẩn `/etc/frp/`.
+### 🏗️ Kiến trúc & Hiệu quả
+-   🔥 **DEDICATED IP MODE**: Tự động tạo instance `frps` riêng cho mỗi user, bind trực tiếp vào IP tĩnh được chỉ định. Cô lập hoàn toàn traffic giữa các người dùng.
+-   🔒 **Bảo mật chuyên sâu**: 
+    -   Loại bỏ hoàn toàn rủi ro Arbitrary Code Execution (không dùng `source`).
+    -   Tự động áp quyền `chmod 600` cho mọi file cấu hình chứa Token.
+    -   Masking nhạy cảm: Ẩn Token khi hiển thị trên terminal.
+-   ⚡ **Robustness**: Hệ thống chống treo loop (Loop Guard), kiểm soát lỗi logic và bảo vệ script trước các tình huống crash do `set -euo pipefail`.
+
+### 🎮 Minecraft Specialized
+-   ✅ **Hỗ trợ Dual-Stack**: Tự động cấu hình TCP và UDP đồng thời cho mọi port.
+-   ✅ **Proxy Protocol v2**: Tích hợp sẵn cho BungeeCord/Velocity trên các gói IP Riêng.
+-   ✅ **Firewall Cleanup**: Tự động quét và đóng toàn bộ các port tương ứng khi xóa user.
+-   ✅ **Config Verification**: Tự động kiểm tra tính hợp lệ của cấu hình (`frpc verify`) trước khi khởi chạy service.
 
 ---
 
-## 🛠️ Hướng dẫn cài đặt nhanh
+## 🛠️ Cài đặt nhanh
 
-Chạy lệnh duy nhất sau trên cả **VPS (Server)** và **Node (Client)**:
+Sử dụng lệnh sau trên cả **VPS** và **Mini PC**:
 
 ```bash
 curl -sL https://raw.githubusercontent.com/anlongawf/reverse-proxy/main/setup_frp.sh -o setup_frp.sh && sudo bash setup_frp.sh
@@ -29,98 +35,45 @@ curl -sL https://raw.githubusercontent.com/anlongawf/reverse-proxy/main/setup_fr
 
 ---
 
-## 📖 Hướng dẫn chi tiết từng bước
+## 📖 Hướng dẫn sử dụng
 
-## 🖥️ Mô phỏng cài đặt thực tế (Step-by-Step)
+### 1. Trên VPS (Quản lý Server)
+1.  Chạy script, chọn **Option 1** để cài đặt bộ lõi và cấu hình Master.
+2.  Dùng **Option 2** để tạo User mới với **IP Riêng** (Dành cho các server lớn, cần dùng BungeeCord/Velocity).
+3.  Dùng **Option 3** để tạo User mới dùng **IP Chung** (Dành cho server nhỏ, tiết kiệm tài nguyên).
 
-### 1. Cài đặt trên VPS (Server)
-Đây là ví dụ khi bạn chạy script trên VPS và chọn Option 1:
-
-```text
-=======================================
-   AUTO SETUP MINECRAFT FRP TUNNEL     
-   V13.0                               
-=======================================
-1. Cài đặt FRP SERVER
-2. Cài đặt FRP CLIENT
-4. GỠ CÀI ĐẶT
-0. Thoát
-
-Lựa chọn: 1
-
---- Chọn IP để bind FRP Server ---
-  1. 103.178.235.70
-Chọn IP [0=Tự gõ]: 1
-Control Port [7000]: 7000
-Auth Token: ******** (Nhập mật khẩu của bạn)
-
->> Đang cài đặt binary FRP mới nhất...
->> Đã mở firewall cho Control Port 7000...
->> SERVER ĐÃ CHẠY!
-   Service : frps-103-178-235-70
-   Config  : /etc/frp/frps-103-178-235-70.toml
-```
-
-### 2. Cài đặt trên máy nội bộ (Client)
-Đây là ví dụ mô phỏng kịch bản A (Mở port 25565 cho Paper/Spigot):
-
-```text
-Lựa chọn: 2
-IP VPS (FRP Server): 103.178.235.70
-Control Port: 7000
-Auth Token: ******** (Nhập mật khẩu y hệt như trên VPS)
-IP local của Node này (Dummy IP) [192.168.254.1]: 192.168.254.1
-
---- Cấu hình Dải Port ---
-Thêm dải port mới? (y/N): y
-  Port bắt đầu: 25565
-  Port kết thúc: 25565
-  Bật Proxy Protocol cho dải 25565-25565? (y/N): n
->> Đã thêm 25565-25565 [TCP+UDP, Proxy Protocol: TẮT]
-
-Thêm dải port mới? (y/N): n
-
->> Dummy IP 192.168.254.1 đã được thêm vào loopback.
->> CLIENT ĐÃ CHẠY!
-   Service        : frpc-192-168-254-1
-   Dummy IP       : 192.168.254.1
-   VPS Server     : 103.178.235.70:7000
-   Config         : /etc/frp/frpc-192-168-254-1.toml
-```
+### 2. Trên Mini PC (Local Node)
+1.  Copy file cấu hình `frpc-user-USERNAME.toml` từ VPS sang thư mục `/etc/frp/` của Mini PC.
+2.  Chạy script, chọn **Option 4**.
+3.  Chọn user tương ứng để tự động tạo Systemd Service và khởi chạy Tunnel.
 
 ---
 
-## ⚡ Kịch bản sử dụng (Use Cases)
+## 📋 So sánh các gói dịch vụ
 
-- **Kịch bản A: Server Paper/Spigot (Java Edition)**
-  - Dummy IP: `192.168.254.1`
-  - Port: `25565`
-  - Proxy Protocol: `N`
-  - *Cấu hình trong `server.properties`:*
-    ```properties
-    server-ip=192.168.254.1
-    server-port=25565
-    ```
-  - *Kết nối:* Người chơi vào bằng `103.178.235.70:25565`.
-
-- **Kịch bản B: Cụm Proxy (Bungee/Velocity) + Bedrock**
-  - **Dải 1**: `25577` (Proxy), Proxy Protocol: `Y`.
-  - **Dải 2**: `19132` (Bedrock), Proxy Protocol: `N`.
-  - *Kết nối:* Java dùng port `25577`, Bedrock dùng port `19132`.
+| Tính năng | IP Riêng (Dedicated) | IP Chung (Shared) |
+| :--- | :--- | :--- |
+| **Instance FRP** | Riêng biệt (Process độc lập) | Dùng chung Master |
+| **IP Kết nối** | IP Tĩnh riêng của User | IP chính của VPS |
+| **Port Game** | Tự do chọn (vd: 25565) | Port ngẫu nhiên (vd: 19xxx) |
+| **Proxy Protocol v2** | Hỗ trợ đầy đủ | Không hỗ trợ |
+| **Độ ổn định** | Cao nhất (Cô lập hoàn toàn) | Khá (Phụ thuộc Master) |
 
 ---
 
-## 🧹 Quản lý & Gỡ cài đặt
+## 🧹 Quản lý hệ thống
 
--   **Xem trạng thái**: `systemctl status frpc-192-168-254-1` (tùy theo Dummy IP).
--   **Reload cấu hình**: Khi muốn thêm port mà không kick player, chạy lại script chọn Option 2 -> Nhập Dummy IP cũ -> Chọn **Option 1 (Append)**.
--   **Gỡ cài đặt**: Chọn **Option 4** trong menu để xóa sạch service và binary.
-
----
-
-## ⚠️ Lưu ý quan trọng
--   Nếu dùng **Proxy Protocol**, bạn **bắt buộc** phải cấu hình trong Server Minecraft/Proxy, nếu không người chơi sẽ không thể kết nối.
--   Đảm bảo VPS đã mở các port Game trên Firewall hệ thống (Script đã hỗ trợ mở tự động nhưng hãy kiểm tra lại trên Dashboard của nhà cung cấp VPS - AWS, Azure, Google Cloud, v.v.).
+-   **Xem danh sách**: Chọn **Option 5** để theo dõi trạng thái sống/chết của từng user.
+-   **Restart nhanh**: Chọn **Option 6** để khởi động lại service của 1 user hoặc toàn bộ hệ thống.
+-   **Xóa User**: Chọn **Option 7**, script sẽ tự động dọn sạch Service, Config và đóng Firewall Ports.
+-   **Xóa sạch**: Chọn **Option 8** nếu bạn muốn reset toàn bộ môi trường FRP.
 
 ---
-*Phát triển bởi anlongawf - V13.0*
+
+## ⚠️ Lưu ý kỹ thuật
+-   **Quyền Root**: Script yêu cầu quyền `sudo` để can thiệp vào `/etc/` và `systemd`.
+-   **Port < 1024**: Cần quyền root trên Mini PC để bind các port đặc biệt này.
+-   **IP Tĩnh**: Khi dùng gói IP Riêng, hãy đảm bảo IP đó đã được cấu hình trên Network Interface của VPS.
+
+---
+*Phát triển bởi anlongawf - Optimized for High-Performance Minecraft Hosting*
