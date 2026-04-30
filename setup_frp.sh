@@ -484,6 +484,107 @@ show_node_guide() {
 }
 
 # ==============================================
+# generate_node_install_script
+# Tạo 1 script tự cài cho Node — nhúng config sẵn
+# Node chỉ cần scp + chạy 1 lệnh duy nhất
+# ==============================================
+generate_node_install_script() {
+    local uname="$1"
+    local node_conf="/etc/frp/frpc-user-${uname}.toml"
+    local install_script="/etc/frp/install-node-${uname}.sh"
+
+    if [ ! -f "$node_conf" ]; then
+        echo -e "${RED}>> Không tìm thấy config ${node_conf}${NC}" >&2
+        return 1
+    fi
+
+    local conf_content
+    conf_content=$(cat "$node_conf")
+    local svc_name="frpc-user-${uname}"
+    local gen_date
+    gen_date=$(date '+%Y-%m-%d %H:%M:%S')
+
+    {
+    cat <<INSTALL_HEADER
+#!/bin/bash
+# ============================================================
+# Auto-generated Node Install Script — ${uname}
+# Generated: ${gen_date}
+# Chạy script này với quyền root trên Node.
+# ============================================================
+set -euo pipefail
+
+if [ "\$EUID" -ne 0 ]; then
+    echo "[Lỗi] Chạy với quyền root: sudo bash \$0"
+    exit 1
+fi
+
+ARCH=\$(uname -m)
+if [ "\$ARCH" = "x86_64" ]; then FRP_ARCH="amd64"
+elif [ "\$ARCH" = "aarch64" ] || [ "\$ARCH" = "arm64" ]; then FRP_ARCH="arm64"
+else echo "[Lỗi] CPU không hỗ trợ: \$ARCH"; exit 1; fi
+
+echo ">> Kiểm tra frpc binary..."
+if ! /usr/local/bin/frpc --version >/dev/null 2>&1; then
+    echo ">> Đang tải frpc..."
+    LATEST=\$(curl -sf https://api.github.com/repos/fatedier/frp/releases/latest \\
+        | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\\1/')
+    VER="\${LATEST#v}"
+    curl -fL "https://github.com/fatedier/frp/releases/download/\${LATEST}/frp_\${VER}_linux_\${FRP_ARCH}.tar.gz" \\
+        -o /tmp/frp-node.tar.gz
+    tar -xzf /tmp/frp-node.tar.gz -C /tmp/
+    cp "/tmp/frp_\${VER}_linux_\${FRP_ARCH}/frpc" /usr/local/bin/frpc
+    chmod +x /usr/local/bin/frpc
+    rm -rf /tmp/frp-node.tar.gz "/tmp/frp_\${VER}_linux_\${FRP_ARCH}"
+    echo ">> Đã cài frpc \${VER}."
+else
+    echo ">> frpc đã có: \$(/usr/local/bin/frpc --version 2>/dev/null)"
+fi
+
+mkdir -p /etc/frp
+
+INSTALL_HEADER
+
+    echo "cat > /etc/frp/frpc-user-${uname}.toml <<'CONF_EOF'"
+    echo "$conf_content"
+    echo "CONF_EOF"
+    echo "chmod 600 /etc/frp/frpc-user-${uname}.toml"
+    echo ""
+
+    cat <<INSTALL_FOOTER
+
+cat > /etc/systemd/system/${svc_name}.service <<'SVC_EOF'
+[Unit]
+Description=FRP Client — Node ${uname}
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc-user-${uname}.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVC_EOF
+
+systemctl daemon-reload
+systemctl enable --now ${svc_name}
+
+echo ""
+echo "✅ frpc Node '${uname}' đã chạy thành công!"
+echo "   Kiểm tra: systemctl status ${svc_name}"
+INSTALL_FOOTER
+    } > "$install_script"
+
+    chmod 700 "$install_script"
+    echo -e "\n${GREEN}${BOLD}>> Install script: ${install_script}${NC}"
+    echo -e "${CYAN}>> Chỉ cần chạy 1 lệnh này trên Node:${NC}"
+    echo -e ""
+    echo -e "${YELLOW}   scp root@VPS_IP:${install_script} /tmp/ && bash /tmp/install-node-${uname}.sh${NC}"
+    echo -e ""
+}
+
+# ==============================================
 # list_users — lặp qua frps-user-* (1 lần / user)
 # Hiển thị cả frps status cho dedicated users
 # ==============================================
@@ -841,8 +942,7 @@ EOF
             [ "$pp" == "y" ] && echo -e "   ${ps}-${pe}  [TCP PP v2 + UDP]" || echo -e "   ${ps}-${pe}  [TCP+UDP]"
         done
         [ "$has_pp" == "y" ] && show_pp_guide "$STATIC_IP"
-        show_node_guide "$USERNAME" "$LOCAL_IP" "$STATIC_IP" "$USER_CTRL_PORT" "$AUTH_TOKEN_USER"
-        echo -e "\n${YELLOW}>> Chạy option 4 trên Node để cài client.${NC}"
+        generate_node_install_script "$USERNAME"
         log_action "ADD_NODE: ${USERNAME} (dedicated, IP=${STATIC_IP}, ctrl=${USER_CTRL_PORT})"
 
     else
@@ -921,8 +1021,7 @@ EOF
             IFS=':' read -r ps pe _pp <<< "$r"
             echo -e "   ${ps}-${pe}"
         done
-        show_node_guide "$USERNAME" "$LOCAL_IP" "$SHARED_IP" "$CTRL_PORT" "$AUTH_TOKEN_USER"
-        echo -e "\n${YELLOW}>> Chạy option 4 trên Node để cài client.${NC}"
+        generate_node_install_script "$USERNAME"
         log_action "ADD_NODE: ${USERNAME} (shared, IP=${SHARED_IP})"
     fi
     ;;
