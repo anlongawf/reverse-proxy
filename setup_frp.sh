@@ -576,11 +576,13 @@ echo "   Kiểm tra: systemctl status ${svc_name}"
 INSTALL_FOOTER
     } > "$install_script"
 
+    local actual_vps_ip
+    actual_vps_ip=$(grep '^BIND_IP=' /etc/frp/.server_meta 2>/dev/null | cut -d= -f2- || echo "VPS_IP")
     chmod 700 "$install_script"
     echo -e "\n${GREEN}${BOLD}>> Install script: ${install_script}${NC}"
     echo -e "${CYAN}>> Chỉ cần chạy 1 lệnh này trên Node:${NC}"
     echo -e ""
-    echo -e "${YELLOW}   scp root@VPS_IP:${install_script} /tmp/ && bash /tmp/install-node-${uname}.sh${NC}"
+    echo -e "${YELLOW}   scp root@${actual_vps_ip}:${install_script} /tmp/ && bash /tmp/install-node-${uname}.sh${NC}"
     echo -e ""
 }
 
