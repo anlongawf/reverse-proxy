@@ -1,16 +1,14 @@
 #!/bin/bash
 
 # ======================================================
-# AUTO SETUP MINECRAFT FRP TUNNEL — V16.0
+# AUTO SETUP MINECRAFT FRP TUNNEL — V17.0
 # ======================================================
-# Changelog từ V15.0:
-#   [FIX]  Option 8 (Xóa sạch): cleanup firewall rules trước khi xóa
-#   [SEC]  frps-main: bind đúng BIND_IP thay vì 0.0.0.0
-#   [FIX]  Option 2: kiểm tra IP riêng không trùng shared/user khác
-#   [FIX]  install_frp_core: hỗ trợ force update (option 9)
-#   [UX]   Thêm option 9: Update FRP binary lên bản mới nhất
-#   [UX]   Thêm audit log (/etc/frp/.audit.log)
-#   [KEEP] Toàn bộ logic V15.0
+# Changelog từ V16.0:
+#   [UX]   Đổi "Mini PC" → "Node" toàn bộ script
+#   [UX]   Gộp option 2+3 thành 1 option "Thêm Node"
+#   [UX]   Tự động dùng IP/port từ .server_meta (bớt bước nhập)
+#   [UX]   Đơn giản hóa menu và hướng dẫn
+#   [KEEP] Toàn bộ logic V16.0
 # ======================================================
 
 set -euo pipefail
@@ -461,9 +459,9 @@ show_pp_guide() {
 }
 
 # ==============================================
-# show_minipc_guide — token đã mask cho an toàn
+# show_node_guide — hướng dẫn cài client trên Node
 # ==============================================
-show_minipc_guide() {
+show_node_guide() {
     local uname=$1 local_ip=$2 vps_ip=$3 ctrl_port=$4 token=$5
     local masked_token
     if [ "${#token}" -gt 8 ]; then
@@ -474,13 +472,13 @@ show_minipc_guide() {
     local W=62
     echo -e ""
     echo -e "${YELLOW}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
-    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "🖥️  TIẾP THEO: SSH vào Mini PC và chạy script này"
+    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "🖥️  TIẾP THEO: SSH vào Node và chạy script này"
     printf "${YELLOW}║  %-$((W-2))s║${NC}\n" ""
-    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "Copy config rồi chọn option 4 trên Mini PC:"
-    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Username" "${uname}"
+    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "Chọn option 4 trên Node, dùng thông tin:"
+    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Node"     "${uname}"
     printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "VPS IP"   "${vps_ip}"
     printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Port"     "${ctrl_port}"
-    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Token"    "${masked_token} (xem config file)"
+    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Token"    "${masked_token} (xem file config)"
     printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Local IP" "${local_ip}"
     echo -e "${YELLOW}╚$(printf '═%.0s' $(seq 1 "$W"))╝${NC}"
 }
@@ -563,7 +561,7 @@ list_users() {
                 echo -e "    Ports  : ${CYAN}${range_str}${NC}"
             fi
         else
-            echo -e "    ${YELLOW}(Chưa có config frpc — cần copy sang Mini PC)${NC}"
+            echo -e "    ${YELLOW}(Chưa cài client — chạy option 4 trên Node)${NC}"
         fi
 
         echo ""
@@ -581,17 +579,16 @@ list_users() {
 # ==============================================
 clear
 echo -e "${GREEN}${BOLD}╔═══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V16.0  ║${NC}"
+echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V17.0  ║${NC}"
 echo -e "${GREEN}${BOLD}╚═══════════════════════════════════════╝${NC}"
 echo ""
-echo "  1. Cài đặt FRP SERVER (chạy trên VPS)"
-echo "  2. Thêm user — Gói IP Riêng  (VPS + Mini PC)"
-echo "  3. Thêm user — Gói IP Chung  (VPS + Mini PC)"
-echo "  4. Cài đặt FRP CLIENT trên Mini PC"
+echo "  1. Cài FRP SERVER   (chạy trên VPS)"
+echo "  2. Thêm Node        (tạo tunnel cho 1 server game)"
+echo "  4. Cài FRP CLIENT   (chạy trên Node/server game)"
 echo "  ─────────────────────────────────────"
-echo "  5. Danh sách user"
-echo "  6. Restart service của 1 user / tất cả"
-echo "  7. Xóa user"
+echo "  5. Danh sách node"
+echo "  6. Restart service"
+echo "  7. Xóa node"
 echo "  8. Xóa SẠCH toàn bộ"
 echo "  9. Update FRP binary"
 echo "  ─────────────────────────────────────"
@@ -694,86 +691,71 @@ EOF
     ;;
 
 # ==============================================
-# --- 2. THÊM USER — GÓI IP RIÊNG ---
-# Tạo frps instance riêng bind đúng IP tĩnh
+# --- 2. THÊM NODE (IP riêng hoặc IP chung) ---
 # ==============================================
 2)
-    echo -e "\n${CYAN}${BOLD}--- Thêm User — Gói IP Riêng ---${NC}"
-    echo -e "  ${YELLOW}Mỗi user có 1 IP tĩnh riêng trên VPS.${NC}"
-    echo -e "  ${YELLOW}Script tạo frps instance riêng bind đúng IP đó.${NC}\n"
+    echo -e "\n${CYAN}${BOLD}--- Thêm Node ---${NC}"
+    echo -e "  ${YELLOW}Node = server game kết nối tunnel về VPS.${NC}\n"
 
     VPS_CTRL_PORT="" AUTH_TOKEN="" BIND_IP=""
     if load_server_meta; then
-        echo -e "${GREEN}>> Đã load config server: Port=${VPS_CTRL_PORT}${NC}"
+        echo -e "${GREEN}>> Config server: ${BIND_IP}:${VPS_CTRL_PORT}${NC}"
+    else
+        echo -e "${RED}>> Chưa có config server — chạy option 1 trước.${NC}"; exit 1
     fi
 
-    read -p "Tên user (vd: userA, no-space): " USERNAME || { echo; exit 1; }
+    read -p "Tên node (vd: node01): " USERNAME || { echo; exit 1; }
     USERNAME="${USERNAME//[^a-zA-Z0-9_-]/-}"
-    if [ -z "$USERNAME" ]; then echo -e "${RED}>> Tên user không hợp lệ.${NC}"; exit 1; fi
-    if [ "${#USERNAME}" -gt 32 ]; then echo -e "${RED}>> Tên user quá dài (max 32).${NC}"; exit 1; fi
-
+    if [ -z "$USERNAME" ]; then echo -e "${RED}>> Tên không hợp lệ.${NC}"; exit 1; fi
+    if [ "${#USERNAME}" -gt 32 ]; then echo -e "${RED}>> Tên quá dài (max 32).${NC}"; exit 1; fi
     if [ -f "/etc/frp/frps-user-${USERNAME}.toml" ]; then
-        echo -e "${RED}>> User '${USERNAME}' đã tồn tại! Xóa trước hoặc dùng tên khác.${NC}"
-        exit 1
+        echo -e "${RED}>> Node '${USERNAME}' đã tồn tại!${NC}"; exit 1
     fi
 
-    read -p "IP tĩnh VPS cấp cho user này (vd: 1.2.3.4): " STATIC_IP || { echo; exit 1; }
-    if ! validate_ip "$STATIC_IP"; then
-        echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1
-    fi
+    read -p "IP server game trên Node [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
+    LOCAL_IP="${LOCAL_IP:-127.0.0.1}"
+    if ! validate_ip "$LOCAL_IP"; then echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; fi
 
-    # Kiểm tra IP riêng không trùng với shared IP
-    if [ -n "${BIND_IP:-}" ] && [ "$STATIC_IP" == "$BIND_IP" ]; then
-        echo -e "${RED}>> IP riêng (${STATIC_IP}) trùng với IP chung của VPS (${BIND_IP})!${NC}"
-        echo -e "${RED}   Dùng IP khác cho user dedicated.${NC}"
-        exit 1
-    fi
+    echo -e "\n${CYAN}Node này có IP public riêng không?${NC}"
+    echo -e "  ${YELLOW}y → IP riêng: player kết nối thẳng IP đó, tạo frps riêng${NC}"
+    echo -e "  ${YELLOW}N → IP chung: dùng IP VPS chính (${BIND_IP}), phân biệt bằng port${NC}"
+    read -p "Dùng IP riêng? (y/N): " use_dedicated || { echo; }
 
-    # Kiểm tra IP chưa dùng bởi user dedicated khác
-    local existing_ip_user
-    existing_ip_user=$(grep -rlF "bindAddr = \"${STATIC_IP}\"" /etc/frp/frps-user-*.toml 2>/dev/null | head -1 || true)
-    if [ -n "$existing_ip_user" ]; then
-        echo -e "${RED}>> IP ${STATIC_IP} đã được dùng bởi: $(basename "$existing_ip_user" .toml)${NC}"
-        exit 1
-    fi
+    if [[ "${use_dedicated:-}" =~ ^[Yy]$ ]]; then
+        # ============ DEDICATED IP ============
+        read -p "IP public riêng của node (vd: 1.2.3.4): " STATIC_IP || { echo; exit 1; }
+        if ! validate_ip "$STATIC_IP"; then echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; fi
+        if [ "$STATIC_IP" == "$BIND_IP" ]; then
+            echo -e "${RED}>> IP riêng trùng với IP chung VPS!${NC}"; exit 1
+        fi
+        local existing_ip_user
+        existing_ip_user=$(grep -rlF "bindAddr = \"${STATIC_IP}\"" /etc/frp/frps-user-*.toml 2>/dev/null | head -1 || true)
+        if [ -n "$existing_ip_user" ]; then
+            echo -e "${RED}>> IP ${STATIC_IP} đã dùng bởi: $(basename "$existing_ip_user" .toml)${NC}"; exit 1
+        fi
+        if ! ip -4 addr show 2>/dev/null | grep -qF "$STATIC_IP"; then
+            echo -e "${YELLOW}>> Cảnh báo: IP ${STATIC_IP} chưa có trên VPS.${NC}"
+            read -p "Vẫn tiếp tục? (y/N): " ip_confirm || { echo; exit 1; }
+            [[ ! "$ip_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
+        fi
 
-    # Kiểm tra IP có trên máy không
-    if ! ip -4 addr show 2>/dev/null | grep -qF "$STATIC_IP"; then
-        echo -e "${YELLOW}>> Cảnh báo: IP ${STATIC_IP} chưa config trên máy này.${NC}"
-        echo -e "${YELLOW}   frps sẽ không start được cho đến khi IP được thêm vào interface.${NC}"
-        read -p "Vẫn tiếp tục? (y/N): " ip_confirm || { echo; exit 1; }
-        [[ ! "$ip_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
-    fi
+        local_base_ctrl=$(( ${VPS_CTRL_PORT:-7000} + 1 ))
+        USER_CTRL_PORT=$(calc_user_ctrl_port "$local_base_ctrl")
+        echo -e "${CYAN}>> Control port: ${USER_CTRL_PORT}${NC}"
 
-    read -p "IP LAN của server game user này trên Mini PC (vd: 192.168.1.10): " LOCAL_IP || { echo; exit 1; }
-    if ! validate_ip "$LOCAL_IP"; then
-        echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1
-    fi
+        read -s -p "Auth Token [Enter = giống server]: " TOKEN_INPUT || { echo; }
+        echo
+        AUTH_TOKEN_USER="${TOKEN_INPUT:-${AUTH_TOKEN:-}}"
+        if [ -z "$AUTH_TOKEN_USER" ]; then echo -e "${RED}>> Token không được trống.${NC}"; exit 1; fi
 
-    # Tính control port riêng cho frps instance này
-    local_base_ctrl=$(( ${VPS_CTRL_PORT:-7000} + 1 ))
-    USER_CTRL_PORT=$(calc_user_ctrl_port "$local_base_ctrl")
-    echo -e "${CYAN}>> Control port cho frps user ${USERNAME}: ${USER_CTRL_PORT}${NC}"
+        get_port_ranges "dedicated"
+        if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then echo -e "${RED}>> Chưa nhập dải port nào.${NC}"; exit 1; fi
 
-    read -s -p "Auth Token [Enter nếu giống server]: " TOKEN_INPUT || { echo; }
-    echo
-    AUTH_TOKEN_USER="${TOKEN_INPUT:-${AUTH_TOKEN:-}}"
-    if [ -z "$AUTH_TOKEN_USER" ]; then
-        echo -e "${RED}>> Token không được trống.${NC}"; exit 1
-    fi
+        install_frp_core
 
-    get_port_ranges "dedicated"
-
-    if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then
-        echo -e "${RED}>> Chưa nhập dải port nào.${NC}"; exit 1
-    fi
-
-    install_frp_core
-
-    # --- Tạo frps config riêng cho user (bind đúng STATIC_IP) ---
-    VPS_CONF="/etc/frp/frps-user-${USERNAME}.toml"
-    cat > "$VPS_CONF" <<EOF
-# === User: ${USERNAME} | Gói: IP Riêng | Static IP: ${STATIC_IP} ===
+        VPS_CONF="/etc/frp/frps-user-${USERNAME}.toml"
+        cat > "$VPS_CONF" <<EOF
+# === Node: ${USERNAME} | IP Riêng: ${STATIC_IP} ===
 # [meta]
 # username = ${USERNAME}
 # package = dedicated
@@ -788,13 +770,12 @@ bindPort = ${USER_CTRL_PORT}
 method = "token"
 token = "${AUTH_TOKEN_USER}"
 EOF
-    chmod 600 "$VPS_CONF"
+        chmod 600 "$VPS_CONF"
 
-    # --- Tạo frps service riêng ---
-    FRPS_SVC="frps-user-${USERNAME}"
-    cat > "/etc/systemd/system/${FRPS_SVC}.service" <<EOF
+        FRPS_SVC="frps-user-${USERNAME}"
+        cat > "/etc/systemd/system/${FRPS_SVC}.service" <<EOF
 [Unit]
-Description=FRP Server — User ${USERNAME} (${STATIC_IP})
+Description=FRP Server — Node ${USERNAME} (${STATIC_IP})
 After=network.target
 
 [Service]
@@ -805,19 +786,17 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    if systemctl enable --now "$FRPS_SVC" 2>/dev/null; then
-        echo -e "${GREEN}>> frps service ${FRPS_SVC} đã start.${NC}"
-    else
-        echo -e "${YELLOW}>> frps service ${FRPS_SVC} chưa start được (có thể IP chưa config).${NC}"
-    fi
+        systemctl daemon-reload
+        if systemctl enable --now "$FRPS_SVC" 2>/dev/null; then
+            echo -e "${GREEN}>> frps ${FRPS_SVC} đã start.${NC}"
+        else
+            echo -e "${YELLOW}>> frps ${FRPS_SVC} chưa start được (IP chưa config?).${NC}"
+        fi
 
-    # --- Tạo frpc config cho Mini PC ---
-    MINIPC_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
-    WS_PORT=$(calc_ws_port "$LOCAL_IP")
-
-    cat > "$MINIPC_CONF" <<EOF
-# === frpc config cho User: ${USERNAME} | Gói: IP Riêng ===
+        NODE_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
+        WS_PORT=$(calc_ws_port "$LOCAL_IP")
+        cat > "$NODE_CONF" <<EOF
+# === frpc — Node: ${USERNAME} | IP Riêng ===
 serverAddr = "${STATIC_IP}"
 serverPort = ${USER_CTRL_PORT}
 
@@ -829,126 +808,67 @@ token = "${AUTH_TOKEN_USER}"
 addr = "127.0.0.1"
 port = ${WS_PORT}
 EOF
-    chmod 600 "$MINIPC_CONF"
+        chmod 600 "$NODE_CONF"
 
-    has_pp="n"
-    for r in "${CUSTOM_RANGES[@]}"; do
-        IFS=':' read -r ps pe pp <<< "$r"
-        write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$MINIPC_CONF" "$pp"
-        [ "$pp" == "y" ] && has_pp="y"
-    done
-
-    # Mở firewall (control port + game ports)
-    FW=$(detect_firewall)
-    if [ "$FW" != "none" ]; then
-        echo -e "${CYAN}>> Mở firewall trên VPS...${NC}"
-        firewall_open_port "$USER_CTRL_PORT" "tcp"
+        has_pp="n"
         for r in "${CUSTOM_RANGES[@]}"; do
-            IFS=':' read -r ps pe _pp <<< "$r"
-            for (( p=ps; p<=pe; p++ )); do
-                firewall_open_port "$p" "tcp"
-                firewall_open_port "$p" "udp"
-            done
+            IFS=':' read -r ps pe pp <<< "$r"
+            write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$NODE_CONF" "$pp"
+            [ "$pp" == "y" ] && has_pp="y"
         done
-        firewall_reload_if_needed
-    fi
 
-    echo -e ""
-    echo -e "${GREEN}${BOLD}>> Đã tạo config cho user '${USERNAME}'!${NC}"
-    echo -e "${GREEN}   Static IP    : ${STATIC_IP}${NC}"
-    echo -e "${GREEN}   Local IP     : ${LOCAL_IP}${NC}"
-    echo -e "${GREEN}   CTRL Port    : ${USER_CTRL_PORT} (frps instance riêng)${NC}"
-    echo -e "${GREEN}   WS Port      : ${WS_PORT} (admin webUI frpc)${NC}"
-    echo -e "${GREEN}   Config VPS   : ${VPS_CONF}${NC}"
-    echo -e "${GREEN}   Config MiniPC: ${MINIPC_CONF}${NC}"
-    echo -e "${GREEN}   frps Service : ${FRPS_SVC}${NC}"
-    echo -e ""
-    echo -e "${CYAN}>> Dải port:${NC}"
-    for r in "${CUSTOM_RANGES[@]}"; do
-        IFS=':' read -r ps pe pp <<< "$r"
-        if [ "$pp" == "y" ]; then
-            echo -e "   ${ps}-${pe}  [TCP có PP v2, UDP không PP]"
-        else
-            echo -e "   ${ps}-${pe}  [TCP+UDP, không PP]"
+        FW=$(detect_firewall)
+        if [ "$FW" != "none" ]; then
+            echo -e "${CYAN}>> Mở firewall...${NC}"
+            firewall_open_port "$USER_CTRL_PORT" "tcp"
+            for r in "${CUSTOM_RANGES[@]}"; do
+                IFS=':' read -r ps pe _pp <<< "$r"
+                for (( p=ps; p<=pe; p++ )); do
+                    firewall_open_port "$p" "tcp"; firewall_open_port "$p" "udp"
+                done
+            done
+            firewall_reload_if_needed
         fi
-    done
 
-    [ "$has_pp" == "y" ] && show_pp_guide "$STATIC_IP"
-    show_minipc_guide "$USERNAME" "$LOCAL_IP" "$STATIC_IP" "$USER_CTRL_PORT" "$AUTH_TOKEN_USER"
+        echo -e "\n${GREEN}${BOLD}>> Node '${USERNAME}' đã tạo xong!${NC}"
+        echo -e "${GREEN}   IP public : ${STATIC_IP}${NC}"
+        echo -e "${GREEN}   Local IP  : ${LOCAL_IP}${NC}"
+        echo -e "${GREEN}   CTRL Port : ${USER_CTRL_PORT}${NC}"
+        echo -e "${GREEN}   Config    : ${NODE_CONF}${NC}"
+        echo -e "\n${CYAN}>> Dải port:${NC}"
+        for r in "${CUSTOM_RANGES[@]}"; do
+            IFS=':' read -r ps pe pp <<< "$r"
+            [ "$pp" == "y" ] && echo -e "   ${ps}-${pe}  [TCP PP v2 + UDP]" || echo -e "   ${ps}-${pe}  [TCP+UDP]"
+        done
+        [ "$has_pp" == "y" ] && show_pp_guide "$STATIC_IP"
+        show_node_guide "$USERNAME" "$LOCAL_IP" "$STATIC_IP" "$USER_CTRL_PORT" "$AUTH_TOKEN_USER"
+        echo -e "\n${YELLOW}>> Chạy option 4 trên Node để cài client.${NC}"
+        log_action "ADD_NODE: ${USERNAME} (dedicated, IP=${STATIC_IP}, ctrl=${USER_CTRL_PORT})"
 
-    echo -e "\n${YELLOW}>> Sau khi SSH vào Mini PC, chọn option 4 để cài frpc cho user này.${NC}"
-    log_action "ADD_USER: ${USERNAME} (dedicated, IP=${STATIC_IP}, ctrl=${USER_CTRL_PORT})"
-    ;;
-
-# ==============================================
-# --- 3. THÊM USER — GÓI IP CHUNG ---
-# ==============================================
-3)
-    echo -e "\n${CYAN}${BOLD}--- Thêm User — Gói IP Chung ---${NC}"
-    echo -e "  ${YELLOW}Nhiều user dùng chung 1 IP VPS, phân biệt bằng port.${NC}"
-    echo -e "  ${YELLOW}PP v2 TẮT — chỉ hỗ trợ Paper/Fabric standalone.${NC}\n"
-
-    # Kiểm tra frps-main đã chạy chưa
-    if ! systemctl is-active --quiet frps-main.service 2>/dev/null; then
-        echo -e "${YELLOW}>> Cảnh báo: frps-main chưa chạy trên VPS này.${NC}"
-        echo -e "${YELLOW}   IP Chung cần frps-main — hãy chạy option 1 trước.${NC}"
-        read -p "Vẫn tiếp tục? (y/N): " frps_confirm || { echo; exit 1; }
-        [[ ! "$frps_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
-    fi
-
-    VPS_CTRL_PORT="" AUTH_TOKEN="" BIND_IP=""
-    if load_server_meta; then
-        echo -e "${GREEN}>> Đã load config server: Port=${VPS_CTRL_PORT}${NC}"
-    fi
-
-    read -p "Tên user (vd: userB, no-space): " USERNAME || { echo; exit 1; }
-    USERNAME="${USERNAME//[^a-zA-Z0-9_-]/-}"
-    if [ -z "$USERNAME" ]; then echo -e "${RED}>> Tên user không hợp lệ.${NC}"; exit 1; fi
-    if [ "${#USERNAME}" -gt 32 ]; then echo -e "${RED}>> Tên user quá dài (max 32).${NC}"; exit 1; fi
-
-    if [ -f "/etc/frp/frps-user-${USERNAME}.toml" ]; then
-        echo -e "${RED}>> User '${USERNAME}' đã tồn tại!${NC}"; exit 1
-    fi
-
-    if [ -n "${BIND_IP:-}" ]; then
-        read -p "IP chung của VPS [${BIND_IP}]: " SHARED_IP || { echo; exit 1; }
-        SHARED_IP="${SHARED_IP:-$BIND_IP}"
     else
-        read -p "IP chung của VPS (vd: 9.9.9.9): " SHARED_IP || { echo; exit 1; }
-    fi
-    if ! validate_ip "$SHARED_IP"; then
-        echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1
-    fi
+        # ============ SHARED IP ============
+        if ! systemctl is-active --quiet frps-main.service 2>/dev/null; then
+            echo -e "${YELLOW}>> Cảnh báo: frps-main chưa chạy — chạy option 1 trước.${NC}"
+            read -p "Vẫn tiếp tục? (y/N): " frps_confirm || { echo; exit 1; }
+            [[ ! "$frps_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
+        fi
 
-    read -p "IP LAN của server game user này trên Mini PC (vd: 192.168.1.11): " LOCAL_IP || { echo; exit 1; }
-    if ! validate_ip "$LOCAL_IP"; then
-        echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1
-    fi
+        SHARED_IP="${BIND_IP}"
+        CTRL_PORT="${VPS_CTRL_PORT:-7000}"
 
-    read -p "VPS Control Port [${VPS_CTRL_PORT:-7000}]: " CTRL_PORT || { echo; exit 1; }
-    CTRL_PORT=${CTRL_PORT:-${VPS_CTRL_PORT:-7000}}
-    if ! validate_port "$CTRL_PORT"; then
-        echo -e "${RED}>> Port không hợp lệ (1-65535).${NC}"; exit 1
-    fi
+        read -s -p "Auth Token [Enter = giống server]: " TOKEN_INPUT || { echo; }
+        echo
+        AUTH_TOKEN_USER="${TOKEN_INPUT:-${AUTH_TOKEN:-}}"
+        if [ -z "$AUTH_TOKEN_USER" ]; then echo -e "${RED}>> Token không được trống.${NC}"; exit 1; fi
 
-    read -s -p "Auth Token [Enter nếu giống server]: " TOKEN_INPUT || { echo; }
-    echo
-    AUTH_TOKEN_USER="${TOKEN_INPUT:-${AUTH_TOKEN:-}}"
-    if [ -z "$AUTH_TOKEN_USER" ]; then
-        echo -e "${RED}>> Token không được trống.${NC}"; exit 1
-    fi
+        get_port_ranges "shared"
+        if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then echo -e "${RED}>> Chưa nhập dải port nào.${NC}"; exit 1; fi
 
-    get_port_ranges "shared"
+        install_frp_core
 
-    if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then
-        echo -e "${RED}>> Chưa nhập dải port nào.${NC}"; exit 1
-    fi
-
-    install_frp_core
-
-    VPS_CONF="/etc/frp/frps-user-${USERNAME}.toml"
-    cat > "$VPS_CONF" <<EOF
-# === User: ${USERNAME} | Gói: IP Chung | Shared IP: ${SHARED_IP} ===
+        VPS_CONF="/etc/frp/frps-user-${USERNAME}.toml"
+        cat > "$VPS_CONF" <<EOF
+# === Node: ${USERNAME} | IP Chung: ${SHARED_IP} ===
 # [meta]
 # username = ${USERNAME}
 # package = shared
@@ -956,13 +876,12 @@ EOF
 # local_ip = ${LOCAL_IP}
 # ctrl_port = ${CTRL_PORT}
 EOF
-    chmod 600 "$VPS_CONF"
+        chmod 600 "$VPS_CONF"
 
-    MINIPC_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
-    WS_PORT=$(calc_ws_port "$LOCAL_IP")
-
-    cat > "$MINIPC_CONF" <<EOF
-# === frpc config cho User: ${USERNAME} | Gói: IP Chung ===
+        NODE_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
+        WS_PORT=$(calc_ws_port "$LOCAL_IP")
+        cat > "$NODE_CONF" <<EOF
+# === frpc — Node: ${USERNAME} | IP Chung ===
 serverAddr = "${SHARED_IP}"
 serverPort = ${CTRL_PORT}
 
@@ -974,53 +893,54 @@ token = "${AUTH_TOKEN_USER}"
 addr = "127.0.0.1"
 port = ${WS_PORT}
 EOF
-    chmod 600 "$MINIPC_CONF"
+        chmod 600 "$NODE_CONF"
 
-    # PP v2 TẮT cứng
-    for r in "${CUSTOM_RANGES[@]}"; do
-        IFS=':' read -r ps pe _pp <<< "$r"
-        write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$MINIPC_CONF" "n"
-    done
-
-    FW=$(detect_firewall)
-    if [ "$FW" != "none" ]; then
-        echo -e "${CYAN}>> Mở firewall trên VPS...${NC}"
         for r in "${CUSTOM_RANGES[@]}"; do
             IFS=':' read -r ps pe _pp <<< "$r"
-            for (( p=ps; p<=pe; p++ )); do
-                firewall_open_port "$p" "tcp"
-                firewall_open_port "$p" "udp"
-            done
+            write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$NODE_CONF" "n"
         done
-        firewall_reload_if_needed
+
+        FW=$(detect_firewall)
+        if [ "$FW" != "none" ]; then
+            echo -e "${CYAN}>> Mở firewall...${NC}"
+            for r in "${CUSTOM_RANGES[@]}"; do
+                IFS=':' read -r ps pe _pp <<< "$r"
+                for (( p=ps; p<=pe; p++ )); do
+                    firewall_open_port "$p" "tcp"; firewall_open_port "$p" "udp"
+                done
+            done
+            firewall_reload_if_needed
+        fi
+
+        echo -e "\n${GREEN}${BOLD}>> Node '${USERNAME}' đã tạo xong!${NC}"
+        echo -e "${GREEN}   IP VPS   : ${SHARED_IP}${NC}"
+        echo -e "${GREEN}   Local IP : ${LOCAL_IP}${NC}"
+        echo -e "${GREEN}   Config   : ${NODE_CONF}${NC}"
+        echo -e "\n${CYAN}>> Dải port (TCP+UDP):${NC}"
+        for r in "${CUSTOM_RANGES[@]}"; do
+            IFS=':' read -r ps pe _pp <<< "$r"
+            echo -e "   ${ps}-${pe}"
+        done
+        show_node_guide "$USERNAME" "$LOCAL_IP" "$SHARED_IP" "$CTRL_PORT" "$AUTH_TOKEN_USER"
+        echo -e "\n${YELLOW}>> Chạy option 4 trên Node để cài client.${NC}"
+        log_action "ADD_NODE: ${USERNAME} (shared, IP=${SHARED_IP})"
     fi
-
-    echo -e ""
-    echo -e "${GREEN}${BOLD}>> Đã tạo config cho user '${USERNAME}'!${NC}"
-    echo -e "${GREEN}   Shared IP : ${SHARED_IP}${NC}"
-    echo -e "${GREEN}   Local IP  : ${LOCAL_IP}${NC}"
-    echo -e "${GREEN}   WS Port   : ${WS_PORT} (admin webUI frpc)${NC}"
-    echo -e "${GREEN}   PP v2: TẮT (IP Chung không hỗ trợ BungeeCord/Velocity)${NC}"
-    echo -e "${GREEN}   Config VPS    : ${VPS_CONF}${NC}"
-    echo -e "${GREEN}   Config MiniPC : ${MINIPC_CONF}${NC}"
-    echo -e ""
-    echo -e "${CYAN}>> Dải port (TCP+UDP, không PP):${NC}"
-    for r in "${CUSTOM_RANGES[@]}"; do
-        IFS=':' read -r ps pe _pp <<< "$r"
-        echo -e "   ${ps}-${pe}"
-    done
-
-    show_minipc_guide "$USERNAME" "$LOCAL_IP" "$SHARED_IP" "$CTRL_PORT" "$AUTH_TOKEN_USER"
-    echo -e "\n${YELLOW}>> Sau khi SSH vào Mini PC, chọn option 4 để cài frpc cho user này.${NC}"
-    log_action "ADD_USER: ${USERNAME} (shared, IP=${SHARED_IP})"
     ;;
 
 # ==============================================
-# --- 4. CÀI FRP CLIENT (Mini PC) ---
+# --- 3. (Đã gộp vào option 2) ---
+# ==============================================
+3)
+    echo -e "${YELLOW}>> Option 3 đã gộp vào option 2. Dùng option 2 để thêm Node.${NC}"
+    exit 0
+    ;;
+
+# ==============================================
+# --- 4. CÀI FRP CLIENT (Node) ---
 # ==============================================
 4)
-    echo -e "\n${CYAN}${BOLD}--- Cài đặt FRP Client trên Mini PC ---${NC}"
-    echo -e "  ${YELLOW}Chạy option này trên Mini PC sau khi đã thêm user trên VPS.${NC}\n"
+    echo -e "\n${CYAN}${BOLD}--- Cài FRP Client trên Node ---${NC}"
+    echo -e "  ${YELLOW}Chạy option này trên Node sau khi đã thêm node trên VPS.${NC}\n"
 
     mapfile -t FRPC_CONFS < <(find /etc/frp -maxdepth 1 -name "frpc-user-*.toml" 2>/dev/null | sort)
 
