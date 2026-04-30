@@ -576,35 +576,12 @@ echo "   Kiểm tra: systemctl status ${svc_name}"
 INSTALL_FOOTER
     } > "$install_script"
 
-    local actual_vps_ip
-    actual_vps_ip=$(grep '^BIND_IP=' /etc/frp/.server_meta 2>/dev/null | cut -d= -f2- || echo "VPS_IP")
     chmod 700 "$install_script"
     echo -e "\n${GREEN}${BOLD}>> Install script: ${install_script}${NC}"
     echo -e "${CYAN}>> Chỉ cần chạy 1 lệnh này trên Node:${NC}"
     echo -e ""
-    echo -e "${YELLOW}   scp root@${actual_vps_ip}:${install_script} /tmp/ && bash /tmp/install-node-${uname}.sh${NC}"
+    echo -e "${YELLOW}   scp root@VPS_IP:${install_script} /tmp/ && bash /tmp/install-node-${uname}.sh${NC}"
     echo -e ""
-
-    echo -e "${CYAN}>> Bạn có muốn TỰ ĐỘNG DEPLOY sang Node qua SSH luôn không?${NC}"
-    echo -e "   ${YELLOW}(Lưu ý: VPS phải SSH được tới Node. Nếu Node ở nhà (NAT), chọn N)${NC}"
-    read -p "Deploy tự động? (y/N): " auto_deploy || true
-    if [[ "${auto_deploy:-}" =~ ^[Yy]$ ]]; then
-        read -p "Nhập IP của Node (để SSH): " node_ssh_ip || true
-        if [ -n "$node_ssh_ip" ]; then
-            read -p "Port SSH [22]: " node_ssh_port || true
-            node_ssh_port=${node_ssh_port:-22}
-            read -p "User SSH [root]: " node_ssh_user || true
-            node_ssh_user=${node_ssh_user:-root}
-            
-            echo -e "\n${YELLOW}>> Đang kết nối tới ${node_ssh_user}@${node_ssh_ip}:${node_ssh_port}...${NC}"
-            echo -e "   ${YELLOW}(Nếu Node hỏi mật khẩu, vui lòng nhập mật khẩu của Node)${NC}"
-            if ssh -p "${node_ssh_port}" -o StrictHostKeyChecking=accept-new "${node_ssh_user}@${node_ssh_ip}" "bash -s" < "$install_script"; then
-                echo -e "\n${GREEN}${BOLD}>> 🎉 DEPLOY TỰ ĐỘNG THÀNH CÔNG! Node đã chạy FRP.${NC}"
-            else
-                echo -e "\n${RED}>> ❌ Lỗi khi kết nối SSH. Bạn hãy chạy thủ công bằng lệnh bên trên.${NC}"
-            fi
-        fi
-    fi
 }
 
 # ==============================================
@@ -1064,36 +1041,118 @@ EOF
     echo -e "\n${CYAN}${BOLD}--- Cài FRP Client trên Node ---${NC}"
     echo -e "  ${YELLOW}Chạy option này trên Node sau khi đã thêm node trên VPS.${NC}\n"
 
-    mapfile -t FRPC_CONFS < <(find /etc/frp -maxdepth 1 -name "frpc-user-*.toml" 2>/dev/null | sort)
+    echo -e "${YELLOW}Bạn có thể cài đặt bằng 2 cách:${NC}"
+    echo -e "  1. Chọn file cấu hình đã tạo sẵn (nếu deploy tự động / copy từ VPS)"
+    echo -e "  2. Nhập cấu hình hoàn toàn bằng tay (Cách cũ)"
+    read -p "Chọn cách [1/2]: " install_method || { echo; exit 1; }
 
-    if [ "${#FRPC_CONFS[@]}" -eq 0 ] || [ -z "${FRPC_CONFS[0]:-}" ]; then
-        echo -e "${YELLOW}>> Không tìm thấy file config frpc nào trong /etc/frp/.${NC}"
-        echo -e "${YELLOW}   Copy file frpc-user-USERNAME.toml từ VPS sang /etc/frp/ trước.${NC}"
-        echo -e "${YELLOW}   Ví dụ: scp root@VPS_IP:/etc/frp/frpc-user-userA.toml /etc/frp/${NC}"
-        exit 1
-    fi
+    if [ "$install_method" == "2" ]; then
+        echo -e "\n${CYAN}--- Nhập cấu hình bằng tay ---${NC}"
+        read -p "Tên node (vd: node01): " USERNAME || { echo; exit 1; }
+        USERNAME="${USERNAME//[^a-zA-Z0-9_-]/-}"
+        if [ -z "$USERNAME" ]; then echo -e "${RED}>> Tên không hợp lệ.${NC}"; exit 1; fi
 
-    echo -e "${CYAN}Chọn user cần cài frpc:${NC}"
-    for i in "${!FRPC_CONFS[@]}"; do
-        frpc_fname=$(basename "${FRPC_CONFS[$i]}" .toml)
-        frpc_uname="${frpc_fname#frpc-user-}"
-        frpc_svc_status=$(systemctl is-active "frpc-user-${frpc_uname}.service" 2>/dev/null || echo "chưa cài")
-        echo -e "  ${YELLOW}$((i+1)).${NC} ${frpc_uname} [${frpc_svc_status}]"
-    done
+        read -p "IP VPS (Server FRP): " VPS_IP || { echo; exit 1; }
+        if ! validate_ip "$VPS_IP"; then echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; fi
 
-    read -p "Chọn số: " fidx || { echo; exit 1; }
-    if ! validate_index "$fidx" "${#FRPC_CONFS[@]}"; then
-        echo -e "${RED}>> Lựa chọn không hợp lệ.${NC}"; exit 1
-    fi
-    SELECTED_CONF="${FRPC_CONFS[$((fidx-1))]}"
-    if [ ! -f "$SELECTED_CONF" ]; then
-        echo -e "${RED}>> File config không tồn tại.${NC}"; exit 1
+        read -p "Control Port VPS [7000]: " CTRL_PORT || { echo; exit 1; }
+        CTRL_PORT=${CTRL_PORT:-7000}
+
+        read -s -p "Auth Token: " AUTH_TOKEN_USER || { echo; exit 1; }
+        echo
+        if [ -z "$AUTH_TOKEN_USER" ]; then echo -e "${RED}>> Token không được trống.${NC}"; exit 1; fi
+
+        read -p "IP server game trên Node [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
+        LOCAL_IP=${LOCAL_IP:-127.0.0.1}
+
+        echo -e "\n${CYAN}Proxy Protocol (PP v2):${NC}"
+        echo -e "  Chỉ bật (y) nếu bạn kết nối BungeeCord/Velocity tới IP public riêng."
+        echo -e "  (Nếu dùng IP chung, hoặc game Bedrock, hãy chọn N)."
+        read -p "Có dùng PP v2 không? (y/N): " USE_PP || { echo; exit 1; }
+        if [[ "$USE_PP" =~ ^[Yy]$ ]]; then
+            use_pp="y"
+        else
+            use_pp="n"
+        fi
+
+        CUSTOM_RANGES=()
+        while true; do
+            read -p "Thêm dải port mới? (y/N): " add_more || { echo; break; }
+            [[ ! "$add_more" =~ ^[Yy]$ ]] && break
+            read -p "  Port bắt đầu: " p_s || { echo; break; }
+            read -p "  Port kết thúc: " p_e || { echo; break; }
+            if ! validate_port "$p_s" || ! validate_port "$p_e"; then
+                echo -e "${RED}  >> Lỗi: Port không hợp lệ!${NC}"; continue
+            fi
+            if [ "$p_e" -lt "$p_s" ]; then
+                echo -e "${RED}  >> Lỗi: Port kết thúc phải >= Port bắt đầu!${NC}"; continue
+            fi
+            CUSTOM_RANGES+=("${p_s}:${p_e}:${use_pp}")
+        done
+
+        if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then
+            echo -e "${RED}>> Phải có ít nhất 1 dải port.${NC}"; exit 1
+        fi
+
+        SELECTED_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
+        WS_PORT=$(calc_ws_port "$LOCAL_IP")
+
+        install_frp_core
+
+        cat > "$SELECTED_CONF" <<EOF
+# === frpc — Node: ${USERNAME} (Manual Install) ===
+serverAddr = "${VPS_IP}"
+serverPort = ${CTRL_PORT}
+
+[auth]
+method = "token"
+token = "${AUTH_TOKEN_USER}"
+
+[webServer]
+addr = "127.0.0.1"
+port = ${WS_PORT}
+EOF
+        chmod 600 "$SELECTED_CONF"
+
+        for r in "${CUSTOM_RANGES[@]}"; do
+            IFS=':' read -r ps pe pp <<< "$r"
+            write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$SELECTED_CONF" "$pp"
+        done
+
+        echo -e "${GREEN}>> Đã tạo cấu hình thủ công tại $SELECTED_CONF${NC}"
+
+    else
+        # --- Cách 1: Tìm config có sẵn ---
+        mapfile -t FRPC_CONFS < <(find /etc/frp -maxdepth 1 -name "frpc-user-*.toml" 2>/dev/null | sort)
+
+        if [ "${#FRPC_CONFS[@]}" -eq 0 ] || [ -z "${FRPC_CONFS[0]:-}" ]; then
+            echo -e "${YELLOW}>> Không tìm thấy file config frpc nào trong /etc/frp/.${NC}"
+            echo -e "${YELLOW}   Hãy chọn cách 2 (Nhập thủ công) hoặc dùng lệnh Deploy tự động từ VPS.${NC}"
+            exit 1
+        fi
+
+        echo -e "${CYAN}Chọn user cần cài frpc:${NC}"
+        for i in "${!FRPC_CONFS[@]}"; do
+            frpc_fname=$(basename "${FRPC_CONFS[$i]}" .toml)
+            frpc_uname="${frpc_fname#frpc-user-}"
+            frpc_svc_status=$(systemctl is-active "frpc-user-${frpc_uname}.service" 2>/dev/null || echo "chưa cài")
+            echo -e "  ${YELLOW}$((i+1)).${NC} ${frpc_uname} [${frpc_svc_status}]"
+        done
+
+        read -p "Chọn số: " fidx || { echo; exit 1; }
+        if ! validate_index "$fidx" "${#FRPC_CONFS[@]}"; then
+            echo -e "${RED}>> Lựa chọn không hợp lệ.${NC}"; exit 1
+        fi
+        SELECTED_CONF="${FRPC_CONFS[$((fidx-1))]}"
+        if [ ! -f "$SELECTED_CONF" ]; then
+            echo -e "${RED}>> File config không tồn tại.${NC}"; exit 1
+        fi
+        
+        install_frp_core
     fi
 
     SEL_FNAME=$(basename "$SELECTED_CONF" .toml)
     SEL_USER="${SEL_FNAME#frpc-user-}"
-
-    install_frp_core
 
     # Verify config nếu FRP >= 0.52
     parse_frp_version "/usr/local/bin/frpc"
