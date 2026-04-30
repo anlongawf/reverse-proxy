@@ -1,28 +1,16 @@
 #!/bin/bash
 
 # ======================================================
-# AUTO SETUP MINECRAFT FRP TUNNEL — V15.0
+# AUTO SETUP MINECRAFT FRP TUNNEL — V16.0
 # ======================================================
-# Changelog từ V14.2:
-#   [ARCH] Gói IP Riêng: tạo frps instance riêng per user,
-#          bind đúng IP tĩnh → port chỉ listen trên IP đó
-#   [SEC]  Bỏ 'source .server_meta' → parse an toàn bằng grep+cut
-#   [SEC]  chmod 600 tất cả config chứa token
-#   [SEC]  Mask token khi hiển thị trên terminal
-#   [FIX]  calc_ws_port: thêm loop guard chống infinite loop
-#   [FIX]  frp_ver_gte_052: dùng if/return tránh (( )) set -e crash
-#   [FIX]  parse_frp_version: dùng IFS thay grep -oP (portable)
-#   [FIX]  Input validation cho array index (chống crash)
-#   [FIX]  firewalld reload dùng if/else tránh set -e crash
-#   [FIX]  Cleanup tmp files với trap EXIT
-#   [FIX]  Xóa user: cleanup firewall rules tương ứng
-#   [FIX]  read -p: handle EOF gracefully
-#   [FIX]  mapfile empty array filter
-#   [FIX]  systemctl restart đơn lẻ có error handling
-#   [UX]   Dùng case thay chuỗi if — short-circuit đúng
-#   [UX]   Thêm frpc verify trước khi start service (>= 0.52)
-#   [UX]   Thêm calc_user_ctrl_port cho dedicated IP
-#   [KEEP] Toàn bộ logic V14.2 đã hoạt động
+# Changelog từ V15.0:
+#   [FIX]  Option 8 (Xóa sạch): cleanup firewall rules trước khi xóa
+#   [SEC]  frps-main: bind đúng BIND_IP thay vì 0.0.0.0
+#   [FIX]  Option 2: kiểm tra IP riêng không trùng shared/user khác
+#   [FIX]  install_frp_core: hỗ trợ force update (option 9)
+#   [UX]   Thêm option 9: Update FRP binary lên bản mới nhất
+#   [UX]   Thêm audit log (/etc/frp/.audit.log)
+#   [KEEP] Toàn bộ logic V15.0
 # ======================================================
 
 set -euo pipefail
@@ -41,6 +29,16 @@ TMPDIR_WORK=$(mktemp -d /tmp/frp-setup.XXXXXX)
 cleanup() { rm -rf "$TMPDIR_WORK"; }
 trap cleanup EXIT
 trap 'echo -e "${RED}[Lỗi nghiêm trọng] Script thất bại tại dòng $LINENO — lệnh: ${BASH_COMMAND}${NC}" >&2' ERR
+
+# ==============================================
+# Audit log
+# ==============================================
+log_action() {
+    local msg="$1"
+    local logfile="/etc/frp/.audit.log"
+    mkdir -p /etc/frp
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $msg" >> "$logfile" 2>/dev/null || true
+}
 
 # ==============================================
 # Kiểm tra root
@@ -85,7 +83,9 @@ load_server_meta() {
 # Function: Cài đặt binary FRP
 # ==============================================
 install_frp_core() {
-    if /usr/local/bin/frps --version >/dev/null 2>&1 && \
+    local force="${1:-}"
+    if [ "$force" != "force" ] && \
+       /usr/local/bin/frps --version >/dev/null 2>&1 && \
        /usr/local/bin/frpc --version >/dev/null 2>&1; then
         local ver
         ver=$(/usr/local/bin/frpc --version 2>/dev/null)
@@ -581,7 +581,7 @@ list_users() {
 # ==============================================
 clear
 echo -e "${GREEN}${BOLD}╔═══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V15.0  ║${NC}"
+echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V16.0  ║${NC}"
 echo -e "${GREEN}${BOLD}╚═══════════════════════════════════════╝${NC}"
 echo ""
 echo "  1. Cài đặt FRP SERVER (chạy trên VPS)"
@@ -593,6 +593,7 @@ echo "  5. Danh sách user"
 echo "  6. Restart service của 1 user / tất cả"
 echo "  7. Xóa user"
 echo "  8. Xóa SẠCH toàn bộ"
+echo "  9. Update FRP binary"
 echo "  ─────────────────────────────────────"
 echo "  0. Thoát"
 echo ""
@@ -650,7 +651,7 @@ case "$choice" in
 
     CONF="/etc/frp/frps-main.toml"
     cat > "$CONF" <<EOF
-bindAddr = "0.0.0.0"
+bindAddr = "${BIND_IP}"
 bindPort = ${CTRL_PORT}
 
 [auth]
@@ -685,10 +686,11 @@ EOF
 
     echo -e ""
     echo -e "${GREEN}${BOLD}>> FRP SERVER ĐÃ CHẠY!${NC}"
-    echo -e "${GREEN}   Bind    : 0.0.0.0:${CTRL_PORT}${NC}"
+    echo -e "${GREEN}   Bind    : ${BIND_IP}:${CTRL_PORT}${NC}"
     echo -e "${GREEN}   Config  : ${CONF}${NC}"
     echo -e "${GREEN}   Service : ${SVC}${NC}"
     echo -e "${YELLOW}   Token đã lưu tại /etc/frp/.server_meta (chmod 600)${NC}"
+    log_action "INSTALL: frps-main trên ${BIND_IP}:${CTRL_PORT}"
     ;;
 
 # ==============================================
@@ -718,6 +720,21 @@ EOF
     read -p "IP tĩnh VPS cấp cho user này (vd: 1.2.3.4): " STATIC_IP || { echo; exit 1; }
     if ! validate_ip "$STATIC_IP"; then
         echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1
+    fi
+
+    # Kiểm tra IP riêng không trùng với shared IP
+    if [ -n "${BIND_IP:-}" ] && [ "$STATIC_IP" == "$BIND_IP" ]; then
+        echo -e "${RED}>> IP riêng (${STATIC_IP}) trùng với IP chung của VPS (${BIND_IP})!${NC}"
+        echo -e "${RED}   Dùng IP khác cho user dedicated.${NC}"
+        exit 1
+    fi
+
+    # Kiểm tra IP chưa dùng bởi user dedicated khác
+    local existing_ip_user
+    existing_ip_user=$(grep -rlF "bindAddr = \"${STATIC_IP}\"" /etc/frp/frps-user-*.toml 2>/dev/null | head -1 || true)
+    if [ -n "$existing_ip_user" ]; then
+        echo -e "${RED}>> IP ${STATIC_IP} đã được dùng bởi: $(basename "$existing_ip_user" .toml)${NC}"
+        exit 1
     fi
 
     # Kiểm tra IP có trên máy không
@@ -860,6 +877,7 @@ EOF
     show_minipc_guide "$USERNAME" "$LOCAL_IP" "$STATIC_IP" "$USER_CTRL_PORT" "$AUTH_TOKEN_USER"
 
     echo -e "\n${YELLOW}>> Sau khi SSH vào Mini PC, chọn option 4 để cài frpc cho user này.${NC}"
+    log_action "ADD_USER: ${USERNAME} (dedicated, IP=${STATIC_IP}, ctrl=${USER_CTRL_PORT})"
     ;;
 
 # ==============================================
@@ -994,6 +1012,7 @@ EOF
 
     show_minipc_guide "$USERNAME" "$LOCAL_IP" "$SHARED_IP" "$CTRL_PORT" "$AUTH_TOKEN_USER"
     echo -e "\n${YELLOW}>> Sau khi SSH vào Mini PC, chọn option 4 để cài frpc cho user này.${NC}"
+    log_action "ADD_USER: ${USERNAME} (shared, IP=${SHARED_IP})"
     ;;
 
 # ==============================================
@@ -1225,6 +1244,7 @@ EOF
 
     systemctl daemon-reload
     echo -e "${GREEN}${BOLD}>> Đã xóa user '${DEL_USER}' thành công.${NC}"
+    log_action "DELETE_USER: ${DEL_USER}"
     ;;
 
 # ==============================================
@@ -1251,6 +1271,27 @@ EOF
         rm -f "/etc/systemd/system/${s}"
     done
 
+    # --- Cleanup firewall trước khi xóa config ---
+    FW=$(detect_firewall)
+    if [ "$FW" != "none" ]; then
+        echo -e "${CYAN}>> Đóng tất cả firewall ports của FRP...${NC}"
+        for conf in /etc/frp/frpc-user-*.toml; do
+            [ -f "$conf" ] || continue
+            CLEANUP_PORTS=$(extract_ports_from_config "$conf")
+            for cp in $CLEANUP_PORTS; do
+                firewall_close_port "$cp" "tcp"
+                firewall_close_port "$cp" "udp"
+            done
+        done
+        # Đóng control ports từ frps configs
+        for conf in /etc/frp/frps-user-*.toml /etc/frp/frps-main.toml; do
+            [ -f "$conf" ] || continue
+            CTRL_P=$(awk '/^bindPort/{print $NF}' "$conf" 2>/dev/null | head -1)
+            [ -n "${CTRL_P:-}" ] && firewall_close_port "$CTRL_P" "tcp"
+        done
+        firewall_reload_if_needed
+    fi
+
     rm -rf /etc/frp
     systemctl daemon-reload
 
@@ -1261,6 +1302,32 @@ EOF
     fi
 
     echo -e "${RED}${BOLD}>> ĐÃ XÓA SẠCH TOÀN BỘ!${NC}"
+    log_action "CLEAN_ALL: xóa toàn bộ FRP configs và services"
+    ;;
+
+# ==============================================
+# --- 9. UPDATE FRP BINARY ---
+# ==============================================
+9)
+    echo -e "\n${CYAN}${BOLD}--- Update FRP Binary ---${NC}"
+    if /usr/local/bin/frpc --version >/dev/null 2>&1; then
+        OLD_VER=$(/usr/local/bin/frpc --version 2>/dev/null)
+        echo -e "${YELLOW}>> Version hiện tại: ${OLD_VER}${NC}"
+    else
+        echo -e "${YELLOW}>> Chưa cài FRP binary.${NC}"
+    fi
+
+    echo -e "${YELLOW}>> Sẽ tải và cài đặt FRP mới nhất từ GitHub.${NC}"
+    read -p "Tiếp tục? (y/N): " upd_confirm || { echo; exit 1; }
+    [[ ! "$upd_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
+
+    install_frp_core "force"
+
+    NEW_VER=$(/usr/local/bin/frpc --version 2>/dev/null || echo "unknown")
+    echo -e "${GREEN}${BOLD}>> Update hoàn tất! Version: ${NEW_VER}${NC}"
+    log_action "UPDATE_FRP: ${OLD_VER:-none} -> ${NEW_VER}"
+
+    echo -e "${YELLOW}>> Bạn nên restart tất cả FRP services (option 6 → 0).${NC}"
     ;;
 
 # ==============================================
