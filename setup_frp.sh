@@ -584,6 +584,27 @@ INSTALL_FOOTER
     echo -e ""
     echo -e "${YELLOW}   scp root@${actual_vps_ip}:${install_script} /tmp/ && bash /tmp/install-node-${uname}.sh${NC}"
     echo -e ""
+
+    echo -e "${CYAN}>> Bạn có muốn TỰ ĐỘNG DEPLOY sang Node qua SSH luôn không?${NC}"
+    echo -e "   ${YELLOW}(Lưu ý: VPS phải SSH được tới Node. Nếu Node ở nhà (NAT), chọn N)${NC}"
+    read -p "Deploy tự động? (y/N): " auto_deploy || true
+    if [[ "${auto_deploy:-}" =~ ^[Yy]$ ]]; then
+        read -p "Nhập IP của Node (để SSH): " node_ssh_ip || true
+        if [ -n "$node_ssh_ip" ]; then
+            read -p "Port SSH [22]: " node_ssh_port || true
+            node_ssh_port=${node_ssh_port:-22}
+            read -p "User SSH [root]: " node_ssh_user || true
+            node_ssh_user=${node_ssh_user:-root}
+            
+            echo -e "\n${YELLOW}>> Đang kết nối tới ${node_ssh_user}@${node_ssh_ip}:${node_ssh_port}...${NC}"
+            echo -e "   ${YELLOW}(Nếu Node hỏi mật khẩu, vui lòng nhập mật khẩu của Node)${NC}"
+            if ssh -p "${node_ssh_port}" -o StrictHostKeyChecking=accept-new "${node_ssh_user}@${node_ssh_ip}" "bash -s" < "$install_script"; then
+                echo -e "\n${GREEN}${BOLD}>> 🎉 DEPLOY TỰ ĐỘNG THÀNH CÔNG! Node đã chạy FRP.${NC}"
+            else
+                echo -e "\n${RED}>> ❌ Lỗi khi kết nối SSH. Bạn hãy chạy thủ công bằng lệnh bên trên.${NC}"
+            fi
+        fi
+    fi
 }
 
 # ==============================================
