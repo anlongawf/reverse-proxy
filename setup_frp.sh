@@ -1,183 +1,110 @@
 #!/bin/bash
 
 # ======================================================
-# AUTO SETUP MINECRAFT FRP TUNNEL — V17.0
+# AUTO SETUP MINECRAFT FRP TUNNEL — V17.1
 # ======================================================
-# Changelog từ V16.0:
-#   [UX]   Đổi "Mini PC" → "Node" toàn bộ script
-#   [UX]   Gộp option 2+3 thành 1 option "Thêm Node"
-#   [UX]   Tự động dùng IP/port từ .server_meta (bớt bước nhập)
-#   [UX]   Đơn giản hóa menu và hướng dẫn
-#   [KEEP] Toàn bộ logic V16.0
+# Changelog từ V17.0:
+#   [FIX]  firewall_open/close_port: thêm || true vào [ ] && echo
+#          tránh set -e crash khi quiet="quiet"
+#   [CLEAN] Gộp logic lặp, bỏ code thừa, gọn hơn ~15%
 # ======================================================
 
 set -euo pipefail
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
-# ==============================================
-# Temp dir + cleanup trap
-# ==============================================
 TMPDIR_WORK=$(mktemp -d /tmp/frp-setup.XXXXXX)
 cleanup() { rm -rf "$TMPDIR_WORK"; }
 trap cleanup EXIT
-trap 'echo -e "${RED}[Lỗi nghiêm trọng] Script thất bại tại dòng $LINENO — lệnh: ${BASH_COMMAND}${NC}" >&2' ERR
+trap 'echo -e "${RED}[Lỗi] Script thất bại tại dòng $LINENO — lệnh: ${BASH_COMMAND}${NC}" >&2' ERR
 
-# ==============================================
-# Audit log
-# ==============================================
 log_action() {
-    local msg="$1"
     local logfile="/etc/frp/.audit.log"
     mkdir -p /etc/frp
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $msg" >> "$logfile" 2>/dev/null || true
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$logfile" 2>/dev/null || true
 }
 
-# ==============================================
-# Kiểm tra root
-# ==============================================
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}[Lỗi] Vui lòng chạy script với quyền root.${NC}"
-    exit 1
-fi
+[ "$EUID" -ne 0 ] && { echo -e "${RED}[Lỗi] Cần quyền root.${NC}"; exit 1; }
 
-# ==============================================
-# Detect CPU arch
-# ==============================================
 ARCH=$(uname -m)
-if [ "$ARCH" = "x86_64" ]; then
-    FRP_ARCH="amd64"
-elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-    FRP_ARCH="arm64"
-else
-    echo -e "${RED}CPU không hỗ trợ: $ARCH${NC}"
-    exit 1
-fi
+case "$ARCH" in
+    x86_64)          FRP_ARCH="amd64" ;;
+    aarch64|arm64)   FRP_ARCH="arm64" ;;
+    *)               echo -e "${RED}CPU không hỗ trợ: $ARCH${NC}"; exit 1 ;;
+esac
 
 mkdir -p /etc/frp
-
 FIREWALLD_RELOAD=0
 
 # ==============================================
-# Function: Load server meta AN TOÀN (không source)
+# Helpers
 # ==============================================
 load_server_meta() {
-    local meta_file="/etc/frp/.server_meta"
-    if [[ ! -f "$meta_file" ]]; then
-        return 1
-    fi
-    VPS_CTRL_PORT=$(grep '^VPS_CTRL_PORT=' "$meta_file" | head -1 | cut -d= -f2-) || true
-    AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$meta_file" | head -1 | cut -d= -f2-) || true
-    BIND_IP=$(grep '^BIND_IP=' "$meta_file" | head -1 | cut -d= -f2-) || true
-    return 0
+    local f="/etc/frp/.server_meta"
+    [[ ! -f "$f" ]] && return 1
+    VPS_CTRL_PORT=$(grep '^VPS_CTRL_PORT=' "$f" | head -1 | cut -d= -f2-)
+    AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$f" | head -1 | cut -d= -f2-)
+    BIND_IP=$(grep '^BIND_IP=' "$f" | head -1 | cut -d= -f2-)
+}
+
+validate_ip() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local oct; for oct in "${BASH_REMATCH[@]:1}"; do (( oct > 255 )) && return 1; done
+}
+
+validate_port()  { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+
+validate_index() {
+    local input="$1" max="$2"
+    [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input <= max ))
 }
 
 # ==============================================
-# Function: Cài đặt binary FRP
+# FRP binary
 # ==============================================
 install_frp_core() {
     local force="${1:-}"
     if [ "$force" != "force" ] && \
        /usr/local/bin/frps --version >/dev/null 2>&1 && \
        /usr/local/bin/frpc --version >/dev/null 2>&1; then
-        local ver
-        ver=$(/usr/local/bin/frpc --version 2>/dev/null)
-        echo -e "${GREEN}>> Lõi FRP đã có sẵn (${ver}), bỏ qua cài đặt.${NC}"
-        return 0
+        echo -e "${GREEN}>> FRP đã có: $(/usr/local/bin/frpc --version 2>/dev/null)${NC}"
+        return
     fi
-    echo -e "${YELLOW}>> Đang cài đặt binary FRP mới nhất...${NC}"
-    local LATEST_RELEASE VERSION_NUM DOWNLOAD_URL FRP_DIR
-    LATEST_RELEASE=$(curl -sf https://api.github.com/repos/fatedier/frp/releases/latest \
+    echo -e "${YELLOW}>> Đang tải FRP mới nhất...${NC}"
+    local rel ver url dir
+    rel=$(curl -sf https://api.github.com/repos/fatedier/frp/releases/latest \
         | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') || true
-    if [ -z "${LATEST_RELEASE:-}" ]; then
-        echo -e "${RED}>> Lỗi: Không lấy được version FRP. Kiểm tra kết nối mạng.${NC}"
-        exit 1
-    fi
-    VERSION_NUM=${LATEST_RELEASE#v}
-    DOWNLOAD_URL="https://github.com/fatedier/frp/releases/download/${LATEST_RELEASE}/frp_${VERSION_NUM}_linux_${FRP_ARCH}.tar.gz"
-    wget -q --show-progress "$DOWNLOAD_URL" -O "${TMPDIR_WORK}/frp.tar.gz" \
-        || { echo -e "${RED}>> Download thất bại.${NC}"; exit 1; }
-    tar -xzf "${TMPDIR_WORK}/frp.tar.gz" -C "${TMPDIR_WORK}" \
-        || { echo -e "${RED}>> Giải nén thất bại.${NC}"; exit 1; }
-    FRP_DIR="frp_${VERSION_NUM}_linux_${FRP_ARCH}"
-    cp "${TMPDIR_WORK}/${FRP_DIR}/frps" /usr/local/bin/frps
-    cp "${TMPDIR_WORK}/${FRP_DIR}/frpc" /usr/local/bin/frpc
+    [ -z "${rel:-}" ] && { echo -e "${RED}>> Không lấy được version FRP.${NC}"; exit 1; }
+    ver="${rel#v}"
+    url="https://github.com/fatedier/frp/releases/download/${rel}/frp_${ver}_linux_${FRP_ARCH}.tar.gz"
+    dir="frp_${ver}_linux_${FRP_ARCH}"
+    wget -q --show-progress "$url" -O "${TMPDIR_WORK}/frp.tar.gz" || { echo -e "${RED}>> Download thất bại.${NC}"; exit 1; }
+    tar -xzf "${TMPDIR_WORK}/frp.tar.gz" -C "${TMPDIR_WORK}" || { echo -e "${RED}>> Giải nén thất bại.${NC}"; exit 1; }
+    cp "${TMPDIR_WORK}/${dir}/frps" /usr/local/bin/frps
+    cp "${TMPDIR_WORK}/${dir}/frpc" /usr/local/bin/frpc
     chmod +x /usr/local/bin/frps /usr/local/bin/frpc
-    if ! /usr/local/bin/frpc --version >/dev/null 2>&1; then
-        echo -e "${RED}>> Binary FRP không chạy được. Kiểm tra CPU arch.${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}>> Cài đặt FRP thành công (v${VERSION_NUM}).${NC}"
+    /usr/local/bin/frpc --version >/dev/null 2>&1 || { echo -e "${RED}>> Binary không chạy được.${NC}"; exit 1; }
+    echo -e "${GREEN}>> Cài FRP thành công (v${ver}).${NC}"
 }
 
-# ==============================================
-# Function: So sánh version FRP >= 0.52
-# (dùng if/return tránh set -e crash)
-# ==============================================
+parse_frp_version() {
+    local ver; ver=$("$1" --version 2>/dev/null) || { FRP_MAJOR=0; FRP_MINOR=0; return 1; }
+    ver="${ver#v}"; IFS='.' read -r FRP_MAJOR FRP_MINOR _ <<< "$ver"
+    FRP_MAJOR="${FRP_MAJOR:-0}"; FRP_MINOR="${FRP_MINOR:-0}"
+}
+
 frp_ver_gte_052() {
     local maj="${1:-0}" min="${2:-0}"
-    if ! [[ "$maj" =~ ^[0-9]+$ ]] || ! [[ "$min" =~ ^[0-9]+$ ]]; then return 1; fi
-    if (( maj > 0 )); then return 0; fi
-    if (( maj == 0 && min >= 52 )); then return 0; fi
-    return 1
+    [[ "$maj" =~ ^[0-9]+$ ]] && [[ "$min" =~ ^[0-9]+$ ]] || return 1
+    (( maj > 0 )) && return 0
+    (( maj == 0 && min >= 52 )) && return 0 || return 1
 }
 
 # ==============================================
-# Function: Parse version từ binary (portable, không dùng grep -oP)
+# Firewall — FIX: thêm || true tránh set -e crash
 # ==============================================
-parse_frp_version() {
-    local bin="$1"
-    local ver_full
-    ver_full=$("$bin" --version 2>/dev/null) || { FRP_MAJOR=0; FRP_MINOR=0; return 1; }
-    ver_full="${ver_full#v}"
-    IFS='.' read -r FRP_MAJOR FRP_MINOR _ <<< "$ver_full"
-    FRP_MAJOR="${FRP_MAJOR:-0}"
-    FRP_MINOR="${FRP_MINOR:-0}"
-}
-
-# ==============================================
-# Function: Mở firewall
-# ==============================================
-firewall_open_port() {
-    local port=$1 proto=${2:-tcp} quiet=${3:-}
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
-        [ "$quiet" != "quiet" ] && echo -e "${GREEN}   [UFW] Mở ${port}/${proto}${NC}"
-    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || true
-        [ "$quiet" != "quiet" ] && echo -e "${GREEN}   [FirewallD] Mở ${port}/${proto}${NC}"
-        FIREWALLD_RELOAD=1
-    elif command -v iptables >/dev/null 2>&1; then
-        if ! iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
-            iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
-            [ "$quiet" != "quiet" ] && echo -e "${GREEN}   [iptables] Mở ${port}/${proto}${NC}"
-        fi
-    fi
-}
-
-# ==============================================
-# Function: Đóng firewall port
-# ==============================================
-firewall_close_port() {
-    local port=$1 proto=${2:-tcp} quiet=${3:-}
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        ufw delete allow "${port}/${proto}" >/dev/null 2>&1 || true
-        [ "$quiet" != "quiet" ] && echo -e "${YELLOW}   [UFW] Đóng ${port}/${proto}${NC}"
-    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1 || true
-        [ "$quiet" != "quiet" ] && echo -e "${YELLOW}   [FirewallD] Đóng ${port}/${proto}${NC}"
-        FIREWALLD_RELOAD=1
-    elif command -v iptables >/dev/null 2>&1; then
-        iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || true
-        [ "$quiet" != "quiet" ] && echo -e "${YELLOW}   [iptables] Đóng ${port}/${proto}${NC}"
-    fi
-}
-
 detect_firewall() {
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
         echo "ufw"
@@ -190,138 +117,111 @@ detect_firewall() {
     fi
 }
 
-# ==============================================
-# Function: Reload firewalld nếu cần (an toàn với set -e)
-# ==============================================
-firewall_reload_if_needed() {
-    if [ "${FIREWALLD_RELOAD}" -eq 1 ]; then
-        if firewall-cmd --reload >/dev/null 2>&1; then
-            FIREWALLD_RELOAD=0
-        else
-            echo -e "${YELLOW}>> Cảnh báo: firewalld reload thất bại.${NC}"
-        fi
+_fw_msg() {
+    # $1=quiet $2=msg — in nếu không quiet (|| true tránh set -e)
+    [ "$1" != "quiet" ] && echo -e "$2" || true
+}
+
+firewall_open_port() {
+    local port=$1 proto=${2:-tcp} quiet=${3:-}
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+        _fw_msg "$quiet" "${GREEN}   [UFW] Mở ${port}/${proto}${NC}"
+    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || true
+        _fw_msg "$quiet" "${GREEN}   [FirewallD] Mở ${port}/${proto}${NC}"
+        FIREWALLD_RELOAD=1
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null \
+            || iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
+        _fw_msg "$quiet" "${GREEN}   [iptables] Mở ${port}/${proto}${NC}"
     fi
 }
 
+firewall_close_port() {
+    local port=$1 proto=${2:-tcp} quiet=${3:-}
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        ufw delete allow "${port}/${proto}" >/dev/null 2>&1 || true
+        _fw_msg "$quiet" "${YELLOW}   [UFW] Đóng ${port}/${proto}${NC}"
+    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1 || true
+        _fw_msg "$quiet" "${YELLOW}   [FirewallD] Đóng ${port}/${proto}${NC}"
+        FIREWALLD_RELOAD=1
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || true
+        _fw_msg "$quiet" "${YELLOW}   [iptables] Đóng ${port}/${proto}${NC}"
+    fi
+}
+
+firewall_reload_if_needed() {
+    [ "${FIREWALLD_RELOAD}" -eq 1 ] || return 0
+    firewall-cmd --reload >/dev/null 2>&1 && FIREWALLD_RELOAD=0 \
+        || echo -e "${YELLOW}>> Cảnh báo: firewalld reload thất bại.${NC}"
+}
+
+open_port_range() {
+    # $1=start $2=end — mở TCP+UDP cho cả dải
+    local p
+    for (( p=$1; p<=$2; p++ )); do
+        firewall_open_port "$p" "tcp" "quiet"
+        firewall_open_port "$p" "udp" "quiet"
+    done
+}
+
+close_port_range() {
+    local p
+    for (( p=$1; p<=$2; p++ )); do
+        firewall_close_port "$p" "tcp" "quiet"
+        firewall_close_port "$p" "udp" "quiet"
+    done
+}
+
 # ==============================================
-# port_used_on_shared — dùng find tránh glob lỗi
+# Port helpers
 # ==============================================
 port_used_on_shared() {
-    local port=$1
-    find /etc/frp -maxdepth 1 -name "*.toml" -exec \
-        grep -lF "remotePort = ${port}" {} \; 2>/dev/null | head -1
+    find /etc/frp -maxdepth 1 -name "*.toml" \
+        -exec grep -lF "remotePort = ${1}" {} \; 2>/dev/null | head -1
 }
 
-# ==============================================
-# validate_ip — kiểm tra từng octet 0-255
-# ==============================================
-validate_ip() {
-    local ip="$1"
-    local octet
-    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
-    for octet in "${BASH_REMATCH[@]:1}"; do
-        if (( octet > 255 )); then return 1; fi
-    done
-    return 0
-}
-
-# ==============================================
-# Function: Validate port number
-# ==============================================
-validate_port() {
-    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
-}
-
-# ==============================================
-# Function: Validate index input (số nguyên trong range)
-# ==============================================
-validate_index() {
-    local input="$1" max="$2"
-    if ! [[ "$input" =~ ^[0-9]+$ ]]; then return 1; fi
-    if (( input < 1 || input > max )); then return 1; fi
-    return 0
-}
-
-# ==============================================
-# calc_ws_port — tính WS_PORT, tự tăng nếu trùng
-# (thêm loop guard chống infinite loop)
-# ==============================================
 calc_ws_port() {
-    local local_ip="$1"
-    local o2 o3 o4
-    IFS='.' read -r _ o2 o3 o4 <<< "$local_ip"
-    local base_port=$(( 40000 + (o2 * 65536 + o3 * 256 + o4) % 15000 ))
-    local candidate=$base_port
-    local attempts=0
+    local ip="$1"; local o2 o3 o4
+    IFS='.' read -r _ o2 o3 o4 <<< "$ip"
+    local candidate=$(( 40000 + (o2 * 65536 + o3 * 256 + o4) % 15000 )) attempts=0
     while grep -rqF "port = ${candidate}" /etc/frp/ 2>/dev/null; do
-        candidate=$(( candidate + 1 ))
-        attempts=$(( attempts + 1 ))
-        if (( candidate > 55000 )); then
-            candidate=40000
-        fi
-        if (( attempts > 15001 )); then
-            echo -e "${RED}>> Hết WS port trống (40000-55000).${NC}" >&2
-            echo "40000"
-            return 1
-        fi
+        (( candidate++ )); (( candidate > 55000 )) && candidate=40000
+        (( ++attempts > 15001 )) && { echo "40000"; return 1; }
     done
     echo "$candidate"
 }
 
-# ==============================================
-# calc_user_ctrl_port — tìm control port chưa dùng cho frps per-user
-# ==============================================
 calc_user_ctrl_port() {
-    local base="${1:-7001}"
-    local candidate=$base
-    local attempts=0
-    local used
-    while true; do
-        used=$(find /etc/frp -maxdepth 1 -name "frps-*.toml" \
-            -exec grep -lF "bindPort = ${candidate}" {} \; 2>/dev/null | head -1)
-        if [ -z "$used" ]; then
-            break
-        fi
-        candidate=$(( candidate + 1 ))
-        attempts=$(( attempts + 1 ))
-        if (( attempts > 1000 )); then
-            echo -e "${RED}>> Không tìm được control port trống.${NC}" >&2
-            echo "$base"
-            return 1
-        fi
+    local candidate="${1:-7001}" attempts=0
+    while find /etc/frp -maxdepth 1 -name "frps-*.toml" \
+            -exec grep -lF "bindPort = ${candidate}" {} \; 2>/dev/null | grep -q .; do
+        (( candidate++ ))
+        (( ++attempts > 1000 )) && { echo "${1:-7001}"; return 1; }
     done
     echo "$candidate"
 }
 
-# ==============================================
-# Function: Extract ports từ config frpc (cho firewall cleanup)
-# ==============================================
 extract_ports_from_config() {
-    local conf="$1"
-    if [ -f "$conf" ]; then
-        grep "^remotePort" "$conf" 2>/dev/null | grep -oE '[0-9]+' | sort -un || true
-    fi
+    [ -f "$1" ] && grep "^remotePort" "$1" 2>/dev/null | grep -oE '[0-9]+' | sort -un || true
 }
 
 # ==============================================
-# Function: Nhập dải port
+# Port range input
 # ==============================================
 get_port_ranges() {
-    local mode=$1
-    CUSTOM_RANGES=()
-
+    local mode=$1; CUSTOM_RANGES=()
     echo -e "\n${CYAN}${BOLD}--- Cấu hình Dải Port ---${NC}"
     if [ "$mode" == "shared" ]; then
-        echo -e "  ${YELLOW}IP Chung: tất cả TCP+UDP, không PP.${NC}"
-        echo -e "  ${YELLOW}Script tự kiểm tra port trùng với user khác.${NC}"
-        echo -e "  ${YELLOW}Ví dụ: 19000-19200, 30000-30200, 40000-40200${NC}"
+        echo -e "  ${YELLOW}IP Chung: TCP+UDP, không PP. Script tự kiểm tra port trùng.${NC}"
+        echo -e "  ${YELLOW}Ví dụ: 19000-19200, 25565-25565${NC}"
     else
-        echo -e "  ${YELLOW}IP Riêng: nhập từng dải, chọn có bật PP v2 không.${NC}"
-        echo -e "  ${YELLOW}PP v2 chỉ áp dụng cho TCP — UDP không bao giờ có PP.${NC}"
-        echo -e "  ${CYAN}  Ví dụ:${NC}"
-        echo -e "  ${CYAN}    25565       → TCP có PP (BungeeCord) + UDP${NC}"
-        echo -e "  ${CYAN}    25566-25572 → TCP+UDP không PP${NC}"
-        echo -e "  ${CYAN}    19132       → TCP+UDP không PP (Geyser)${NC}"
+        echo -e "  ${YELLOW}IP Riêng: chọn có bật PP v2 (BungeeCord/Velocity) hay không.${NC}"
+        echo -e "  ${CYAN}  y → TCP có PP v2 + UDP không PP${NC}"
+        echo -e "  ${CYAN}  N → TCP+UDP thuần (Paper, Fabric, Geyser...)${NC}"
     fi
     echo ""
 
@@ -333,25 +233,19 @@ get_port_ranges() {
         read -p "  Port kết thúc: " p_e || { echo; break; }
 
         if ! validate_port "$p_s" || ! validate_port "$p_e"; then
-            echo -e "${RED}  >> Lỗi: Port không hợp lệ (1-65535)!${NC}"
-            continue
+            echo -e "${RED}  >> Port không hợp lệ (1-65535)!${NC}"; continue
         fi
         if [ "$p_e" -lt "$p_s" ]; then
-            echo -e "${RED}  >> Lỗi: Port kết thúc phải >= Port bắt đầu!${NC}"
-            continue
+            echo -e "${RED}  >> Port kết thúc phải >= bắt đầu!${NC}"; continue
         fi
+        (( p_s < 1024 )) && echo -e "${YELLOW}  >> Cảnh báo: Port < 1024 cần root.${NC}"
 
-        # Cảnh báo port thấp
-        if (( p_s < 1024 )); then
-            echo -e "${YELLOW}  >> Cảnh báo: Port < 1024 cần quyền root trên backend server.${NC}"
-        fi
-
-        # Check overlap với dải đã nhập trong session này
+        # Kiểm tra overlap trong session
         local overlap=0
         for r in "${CUSTOM_RANGES[@]+"${CUSTOM_RANGES[@]}"}"; do
-            IFS=':' read -r ex_s ex_e _pp <<< "$r"
+            IFS=':' read -r ex_s ex_e _ <<< "$r"
             if [ "$p_s" -le "$ex_e" ] && [ "$p_e" -ge "$ex_s" ]; then
-                echo -e "${YELLOW}  >> Cảnh báo: Trùng với dải đã nhập ${ex_s}-${ex_e}!${NC}"
+                echo -e "${YELLOW}  >> Trùng với dải đã nhập ${ex_s}-${ex_e}!${NC}"
                 overlap=1; break
             fi
         done
@@ -361,35 +255,26 @@ get_port_ranges() {
         fi
 
         local use_pp="n"
-
         if [ "$mode" == "dedicated" ]; then
-            echo -e "  ${YELLOW}Dải ${p_s}-${p_e}: có dùng BungeeCord/Velocity không?${NC}"
-            echo -e "  ${CYAN}  y → PP v2 bật cho TCP (BungeeCord/Velocity port)${NC}"
-            echo -e "  ${CYAN}  N → TCP+UDP thuần (Paper, Fabric, Geyser, v.v.)${NC}"
             read -p "  Bật PP v2 cho dải này? (y/N): " pp_input || { echo; }
             [[ "${pp_input:-}" =~ ^[Yy]$ ]] && use_pp="y"
-
-            if [ "$use_pp" == "y" ]; then
-                echo -e "  ${GREEN}>> Thêm ${p_s}-${p_e} [TCP có PP v2, UDP không PP]${NC}"
-            else
-                echo -e "  ${GREEN}>> Thêm ${p_s}-${p_e} [TCP+UDP, không PP]${NC}"
-            fi
-
+            [ "$use_pp" == "y" ] \
+                && echo -e "  ${GREEN}>> Thêm ${p_s}-${p_e} [TCP PP v2 + UDP]${NC}" \
+                || echo -e "  ${GREEN}>> Thêm ${p_s}-${p_e} [TCP+UDP]${NC}"
         elif [ "$mode" == "shared" ]; then
             local conflict=0
             for (( p=p_s; p<=p_e; p++ )); do
-                local used_by
-                used_by=$(port_used_on_shared "$p")
+                local used_by; used_by=$(port_used_on_shared "$p")
                 if [ -n "$used_by" ]; then
                     echo -e "${RED}  >> Port ${p} đã dùng bởi: $(basename "$used_by")${NC}"
                     conflict=1
                 fi
             done
             if [ "$conflict" -eq 1 ]; then
-                read -p "  Vẫn thêm dải này? (y/N): " fc || { echo; continue; }
+                read -p "  Vẫn thêm? (y/N): " fc || { echo; continue; }
                 [[ ! "$fc" =~ ^[Yy]$ ]] && continue
             fi
-            echo -e "  ${GREEN}>> Thêm ${p_s}-${p_e} [TCP+UDP, không PP]${NC}"
+            echo -e "  ${GREEN}>> Thêm ${p_s}-${p_e} [TCP+UDP]${NC}"
         fi
 
         CUSTOM_RANGES+=("${p_s}:${p_e}:${use_pp}")
@@ -397,18 +282,14 @@ get_port_ranges() {
 }
 
 # ==============================================
-# Function: Ghi proxy entries vào file config frpc
-# $1=username $2=port_start $3=port_end $4=local_ip
-# $5=target_file $6=use_pp(y/n)
+# Write proxy entries
 # ==============================================
 write_proxies() {
     local uname=$1 p_s=$2 p_e=$3 local_ip=$4 target=$5 use_pp=$6
     local uname_clean="${uname//[^a-zA-Z0-9_-]/-}"
-    local lip_dash="${local_ip//./-}"
-    local p
+    local lip_dash="${local_ip//./-}" p
 
     for (( p=p_s; p<=p_e; p++ )); do
-        # TCP
         cat >> "$target" <<EOF
 
 [[proxies]]
@@ -418,11 +299,8 @@ localIP = "${local_ip}"
 localPort = ${p}
 remotePort = ${p}
 EOF
-        if [ "$use_pp" == "y" ]; then
-            echo "transport.proxyProtocolVersion = \"v2\"" >> "$target"
-        fi
+        [ "$use_pp" == "y" ] && echo 'transport.proxyProtocolVersion = "v2"' >> "$target"
 
-        # UDP (không bao giờ có PP)
         cat >> "$target" <<EOF
 
 [[proxies]]
@@ -436,68 +314,42 @@ EOF
 }
 
 # ==============================================
-# show_pp_guide — hướng dẫn config BungeeCord/Velocity
+# Helpers hiển thị
 # ==============================================
 show_pp_guide() {
-    local static_ip=$1
-    local W=62
-    echo -e ""
-    echo -e "${CYAN}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "📋 HƯỚNG DẪN GỬI CHO USER (Gói IP Riêng)"
+    local ip=$1 W=62
+    echo -e "\n${CYAN}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "📋 HƯỚNG DẪN PP v2 — IP Riêng"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "IP kết nối: ${ip}"
     printf "${CYAN}║  %-$((W-2))s║${NC}\n" ""
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "IP kết nối: ${static_ip}"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "BungeeCord/Waterfall — config.yml:"
+    printf "${CYAN}║    %-$((W-4))s║${NC}\n" "proxy_protocol: true   ip_forward: true"
     printf "${CYAN}║  %-$((W-2))s║${NC}\n" ""
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "Nếu dùng BungeeCord/Waterfall — config.yml:"
-    printf "${CYAN}║    %-$((W-4))s║${NC}\n" "proxy_protocol: true"
-    printf "${CYAN}║    %-$((W-4))s║${NC}\n" "ip_forward: true"
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" ""
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "Nếu dùng Velocity — velocity.toml:"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "Velocity — velocity.toml:"
     printf "${CYAN}║    %-$((W-4))s║${NC}\n" "haproxy-protocol = true"
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" ""
     printf "${CYAN}║  %-$((W-2))s║${NC}\n" "❌ Quên config → Player KHÔNG vào được!"
     echo -e "${CYAN}╚$(printf '═%.0s' $(seq 1 "$W"))╝${NC}"
 }
 
-# ==============================================
-# generate_node_install_script — Lệnh cài tự động
-# ==============================================
 generate_node_install_script() {
-    local uname="$1"
-    local conf="/etc/frp/frpc-user-${uname}.toml"
-    if [ ! -f "$conf" ]; then
-        return 1
-    fi
-    
-    local b64
-    b64=$(base64 -w0 "$conf")
-    
+    local uname="$1" conf="/etc/frp/frpc-user-${1}.toml"
+    [ ! -f "$conf" ] && return 1
+    local b64; b64=$(base64 -w0 "$conf")
     local W=68
     echo -e "\n${YELLOW}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
-    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "🚀 LỆNH CÀI ĐẶT NHANH CHO NODE (COPY & PASTE TRÊN SSH NODE)"
-    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" ""
-    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "Chạy toàn bộ khối lệnh dưới đây trên Node (quyền root):"
+    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "🚀 LỆNH CÀI NHANH — CHẠY TRÊN NODE (quyền root)"
     echo -e "${YELLOW}╚$(printf '═%.0s' $(seq 1 "$W"))╝${NC}\n"
-    
-    echo -e "${GREEN}mkdir -p /etc/frp && echo \"${b64}\" | base64 -d > \"/etc/frp/frpc-user-${uname}.toml\" && chmod 600 \"/etc/frp/frpc-user-${uname}.toml\" && echo -e \"\\n\\e[32m[+] Config lưu tại /etc/frp/frpc-user-${uname}.toml\\e[0m\\n\\e[33m[!] Hãy chạy script setup_frp.sh -> chọn Option 4 -> Chọn Cách 1\\e[0m\"${NC}\n"
+    echo -e "${GREEN}mkdir -p /etc/frp && echo \"${b64}\" | base64 -d > \"/etc/frp/frpc-user-${uname}.toml\" && chmod 600 \"/etc/frp/frpc-user-${uname}.toml\" && echo -e \"\\n\\e[32m[+] Config OK\\e[0m\\n\\e[33m[!] Chạy script -> Option 4 -> Cách 1\\e[0m\"${NC}\n"
 }
 
-
-# ==============================================
-# list_users — lặp qua frps-user-* (1 lần / user)
-# Hiển thị cả frps status cho dedicated users
-# ==============================================
 list_users() {
     echo -e "\n${CYAN}${BOLD}=== DANH SÁCH USER FRP ===${NC}"
     local found=0
 
     while IFS= read -r conf; do
-        local fname uname pkg pkg_ip frps_svc_status frpc_svc_status
-        fname=$(basename "$conf" .toml)
-        uname="${fname#frps-user-}"
-
-        # Detect gói từ meta comment
-        pkg="IP Chung"
-        pkg_ip=""
+        local fname uname pkg pkg_ip frps_status frpc_status sc
+        fname=$(basename "$conf" .toml); uname="${fname#frps-user-}"
+        pkg="IP Chung"; pkg_ip=""
         if grep -qF "static_ip" "$conf" 2>/dev/null; then
             pkg_ip=$(awk '/static_ip/{print $NF}' "$conf" | head -1)
             [ -n "$pkg_ip" ] && pkg="IP Riêng (${pkg_ip})"
@@ -506,70 +358,46 @@ list_users() {
             [ -n "$pkg_ip" ] && pkg="IP Chung (${pkg_ip})"
         fi
 
-        # Trạng thái frps service (chỉ dedicated mới có)
-        frps_svc_status=""
-        if systemctl list-units --all --no-legend 2>/dev/null | grep -qF "frps-user-${uname}.service"; then
-            frps_svc_status=$(systemctl is-active "frps-user-${uname}.service" 2>/dev/null || echo "inactive")
-        fi
-
-        # Trạng thái frpc service
-        frpc_svc_status=$(systemctl is-active "frpc-user-${uname}.service" 2>/dev/null || echo "inactive")
-        local status_color="$GREEN"
-        [ "$frpc_svc_status" != "active" ] && status_color="$RED"
+        frpc_status=$(systemctl is-active "frpc-user-${uname}.service" 2>/dev/null || echo "inactive")
+        sc="$GREEN"; [ "$frpc_status" != "active" ] && sc="$RED"
 
         echo -e "  ${BOLD}${uname}${NC} [${pkg}]"
-        if [ -n "$frps_svc_status" ]; then
-            local frps_color="$GREEN"
-            [ "$frps_svc_status" != "active" ] && frps_color="$RED"
-            echo -e "    frps   : ${frps_color}${frps_svc_status}${NC} (server instance)"
-        fi
-        echo -e "    frpc   : ${status_color}${frpc_svc_status}${NC}"
-        echo -e "    Meta   : ${conf}"
 
-        # Lấy port từ frpc config
+        if systemctl list-units --all --no-legend 2>/dev/null | grep -qF "frps-user-${uname}.service"; then
+            frps_status=$(systemctl is-active "frps-user-${uname}.service" 2>/dev/null || echo "inactive")
+            local fsc="$GREEN"; [ "$frps_status" != "active" ] && fsc="$RED"
+            echo -e "    frps : ${fsc}${frps_status}${NC}"
+        fi
+        echo -e "    frpc : ${sc}${frpc_status}${NC}"
+        echo -e "    Meta : ${conf}"
+
         local frpc_conf="/etc/frp/frpc-user-${uname}.toml"
         if [ -f "$frpc_conf" ]; then
-            echo -e "    Client : ${frpc_conf}"
-
-            # Gom remotePort thành dải để hiển thị gọn
-            local ports range_str="" prev="" start=""
+            echo -e "    Conf : ${frpc_conf}"
+            # Hiển thị port dạng dải gọn
+            local ports range_str="" start="" prev=""
             ports=$(grep "^remotePort" "$frpc_conf" 2>/dev/null \
                 | grep -oE '[0-9]+' | sort -un | tr '\n' ' ' || true)
-            if [ -n "$ports" ]; then
-                for pp in $ports; do
-                    if [ -z "$start" ]; then
-                        start=$pp; prev=$pp
-                    elif [ "$pp" -eq $(( prev + 1 )) ]; then
-                        prev=$pp
-                    else
-                        if [ "$start" == "$prev" ]; then
-                            range_str+="${start} "
-                        else
-                            range_str+="${start}-${prev} "
-                        fi
-                        start=$pp; prev=$pp
-                    fi
-                done
-                if [ -n "$start" ]; then
-                    if [ "$start" == "$prev" ]; then
-                        range_str+="${start}"
-                    else
-                        range_str+="${start}-${prev}"
-                    fi
+            for pp in $ports; do
+                if [ -z "$start" ]; then start=$pp; prev=$pp
+                elif [ "$pp" -eq $(( prev + 1 )) ]; then prev=$pp
+                else
+                    [ "$start" == "$prev" ] && range_str+="${start} " || range_str+="${start}-${prev} "
+                    start=$pp; prev=$pp
                 fi
-                echo -e "    Ports  : ${CYAN}${range_str}${NC}"
+            done
+            if [ -n "$start" ]; then
+                [ "$start" == "$prev" ] && range_str+="${start}" || range_str+="${start}-${prev}"
             fi
+            [ -n "$range_str" ] && echo -e "    Port : ${CYAN}${range_str}${NC}"
         else
             echo -e "    ${YELLOW}(Chưa cài client — chạy option 4 trên Node)${NC}"
         fi
 
-        echo ""
-        found=1
+        echo ""; found=1
     done < <(find /etc/frp -maxdepth 1 -name "frps-user-*.toml" 2>/dev/null | sort)
 
-    if [ "$found" -eq 0 ]; then
-        echo -e "  ${YELLOW}Chưa có user nào.${NC}"
-    fi
+    [ "$found" -eq 0 ] && echo -e "  ${YELLOW}Chưa có user nào.${NC}"
     echo ""
 }
 
@@ -578,7 +406,7 @@ list_users() {
 # ==============================================
 clear
 echo -e "${GREEN}${BOLD}╔═══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V17.0  ║${NC}"
+echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V17.1  ║${NC}"
 echo -e "${GREEN}${BOLD}╚═══════════════════════════════════════╝${NC}"
 echo ""
 echo "  1. Cài FRP SERVER   (chạy trên VPS)"
@@ -593,59 +421,47 @@ echo "  9. Update FRP binary"
 echo "  ─────────────────────────────────────"
 echo "  0. Thoát"
 echo ""
-read -p "Lựa chọn: " choice || { echo -e "\n${RED}>> EOF detected.${NC}"; exit 1; }
+read -p "Lựa chọn: " choice || { echo -e "\n${RED}>> EOF.${NC}"; exit 1; }
 
 case "$choice" in
 
 # ==============================================
-# --- 1. CÀI FRP SERVER (VPS) ---
+# 1. CÀI FRP SERVER
 # ==============================================
 1)
     echo -e "\n${CYAN}${BOLD}--- Cài đặt FRP Server trên VPS ---${NC}"
 
-    mapfile -t IP_LIST < <(ip -4 addr show scope global | grep -oE 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}')
-    echo -e "\n${CYAN}IP đang có trên máy này:${NC}"
-    for i in "${!IP_LIST[@]}"; do
-        echo -e "  ${YELLOW}$((i+1)).${NC} ${IP_LIST[$i]}"
-    done
+    mapfile -t IP_LIST < <(ip -4 addr show scope global | grep -oE 'inet [0-9.]+' | awk '{print $2}')
+    echo -e "\n${CYAN}IP trên máy:${NC}"
+    for i in "${!IP_LIST[@]}"; do echo -e "  ${YELLOW}$((i+1)).${NC} ${IP_LIST[$i]}"; done
     echo -e "  ${YELLOW}0.${NC} Tự gõ IP"
 
-    read -p "Chọn IP bind [0=Tự gõ]: " ip_idx || { echo; exit 1; }
+    read -p "Chọn IP [0=Tự gõ]: " ip_idx || { echo; exit 1; }
     if [ "$ip_idx" == "0" ]; then
         read -p "Nhập IP: " BIND_IP || { echo; exit 1; }
     else
-        if ! validate_index "$ip_idx" "${#IP_LIST[@]}"; then
-            echo -e "${RED}>> Lựa chọn không hợp lệ.${NC}"; exit 1
-        fi
+        validate_index "$ip_idx" "${#IP_LIST[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
         BIND_IP="${IP_LIST[$((ip_idx-1))]}"
     fi
-
-    if ! validate_ip "${BIND_IP:-}"; then
-        echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1
-    fi
+    validate_ip "${BIND_IP:-}" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
 
     read -p "Control Port [7000]: " CTRL_PORT || { echo; exit 1; }
     CTRL_PORT=${CTRL_PORT:-7000}
-    if ! validate_port "$CTRL_PORT"; then
-        echo -e "${RED}>> Port không hợp lệ (1-65535).${NC}"; exit 1
-    fi
+    validate_port "$CTRL_PORT" || { echo -e "${RED}>> Port không hợp lệ.${NC}"; exit 1; }
 
-    read -s -p "Auth Token (sẽ dùng cho mọi user): " AUTH_TOKEN || { echo; exit 1; }
-    echo
-    if [ -z "$AUTH_TOKEN" ]; then
-        echo -e "${RED}>> Token không được trống.${NC}"; exit 1
-    fi
+    read -s -p "Auth Token: " AUTH_TOKEN || { echo; exit 1; }; echo
+    [ -z "$AUTH_TOKEN" ] && { echo -e "${RED}>> Token trống.${NC}"; exit 1; }
 
     install_frp_core
 
     FW=$(detect_firewall)
     if [ "$FW" != "none" ]; then
-        echo -e "${CYAN}>> Mở firewall control port ${CTRL_PORT}...${NC}"
+        echo -e "${CYAN}>> Mở firewall port ${CTRL_PORT}...${NC}"
         firewall_open_port "$CTRL_PORT" "tcp"
         firewall_reload_if_needed
     fi
 
-    CONF="/etc/frp/frps-main.toml"
+    local CONF="/etc/frp/frps-main.toml"
     cat > "$CONF" <<EOF
 bindAddr = "${BIND_IP}"
 bindPort = ${CTRL_PORT}
@@ -663,8 +479,7 @@ BIND_IP=${BIND_IP}
 EOF
     chmod 600 /etc/frp/.server_meta
 
-    SVC="frps-main"
-    cat > "/etc/systemd/system/${SVC}.service" <<EOF
+    cat > "/etc/systemd/system/frps-main.service" <<EOF
 [Unit]
 Description=FRP Server Main
 After=network.target
@@ -678,81 +493,70 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now "$SVC"
+    systemctl enable --now frps-main
 
-    echo -e ""
-    echo -e "${GREEN}${BOLD}>> FRP SERVER ĐÃ CHẠY!${NC}"
+    echo -e "\n${GREEN}${BOLD}>> FRP SERVER ĐÃ CHẠY!${NC}"
     echo -e "${GREEN}   Bind    : ${BIND_IP}:${CTRL_PORT}${NC}"
     echo -e "${GREEN}   Config  : ${CONF}${NC}"
-    echo -e "${GREEN}   Service : ${SVC}${NC}"
-    echo -e "${YELLOW}   Token đã lưu tại /etc/frp/.server_meta (chmod 600)${NC}"
+    echo -e "${YELLOW}   Token lưu tại /etc/frp/.server_meta${NC}"
     log_action "INSTALL: frps-main trên ${BIND_IP}:${CTRL_PORT}"
     ;;
 
 # ==============================================
-# --- 2. THÊM NODE (IP riêng hoặc IP chung) ---
+# 2. THÊM NODE
 # ==============================================
 2)
     echo -e "\n${CYAN}${BOLD}--- Thêm Node ---${NC}"
-    echo -e "  ${YELLOW}Node = server game kết nối tunnel về VPS.${NC}\n"
 
     VPS_CTRL_PORT="" AUTH_TOKEN="" BIND_IP=""
-    if load_server_meta; then
-        echo -e "${GREEN}>> Config server: ${BIND_IP}:${VPS_CTRL_PORT}${NC}"
-    else
-        echo -e "${RED}>> Chưa có config server — chạy option 1 trước.${NC}"; exit 1
-    fi
+    load_server_meta || { echo -e "${RED}>> Chưa có config server — chạy option 1 trước.${NC}"; exit 1; }
+    echo -e "${GREEN}>> Server: ${BIND_IP}:${VPS_CTRL_PORT}${NC}"
 
     read -p "Tên node (vd: node01): " USERNAME || { echo; exit 1; }
     USERNAME="${USERNAME//[^a-zA-Z0-9_-]/-}"
-    if [ -z "$USERNAME" ]; then echo -e "${RED}>> Tên không hợp lệ.${NC}"; exit 1; fi
-    if [ "${#USERNAME}" -gt 32 ]; then echo -e "${RED}>> Tên quá dài (max 32).${NC}"; exit 1; fi
-    if [ -f "/etc/frp/frps-user-${USERNAME}.toml" ]; then
-        echo -e "${RED}>> Node '${USERNAME}' đã tồn tại!${NC}"; exit 1
-    fi
+    [ -z "$USERNAME" ] && { echo -e "${RED}>> Tên trống.${NC}"; exit 1; }
+    [ "${#USERNAME}" -gt 32 ] && { echo -e "${RED}>> Tên quá dài (max 32).${NC}"; exit 1; }
+    [ -f "/etc/frp/frps-user-${USERNAME}.toml" ] && { echo -e "${RED}>> Node '${USERNAME}' đã tồn tại!${NC}"; exit 1; }
 
-    read -p "IP server game trên Node [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
+    read -p "IP server game [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
     LOCAL_IP="${LOCAL_IP:-127.0.0.1}"
-    if ! validate_ip "$LOCAL_IP"; then echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; fi
+    validate_ip "$LOCAL_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
 
-    echo -e "\n${CYAN}Node này có IP public riêng không?${NC}"
-    echo -e "  ${YELLOW}y → IP riêng: player kết nối thẳng IP đó, tạo frps riêng${NC}"
-    echo -e "  ${YELLOW}N → IP chung: dùng IP VPS chính (${BIND_IP}), phân biệt bằng port${NC}"
+    echo -e "\n${CYAN}Node có IP public riêng không?${NC}"
+    echo -e "  ${YELLOW}y → IP riêng: player kết nối thẳng IP đó${NC}"
+    echo -e "  ${YELLOW}N → IP chung: dùng IP VPS (${BIND_IP}), phân biệt bằng port${NC}"
     read -p "Dùng IP riêng? (y/N): " use_dedicated || { echo; }
 
     if [[ "${use_dedicated:-}" =~ ^[Yy]$ ]]; then
-        # ============ DEDICATED IP ============
-        read -p "IP public riêng của node (vd: 1.2.3.4): " STATIC_IP || { echo; exit 1; }
-        if ! validate_ip "$STATIC_IP"; then echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; fi
-        if [ "$STATIC_IP" == "$BIND_IP" ]; then
-            echo -e "${RED}>> IP riêng trùng với IP chung VPS!${NC}"; exit 1
-        fi
-        local existing_ip_user
-        existing_ip_user=$(grep -rlF "bindAddr = \"${STATIC_IP}\"" /etc/frp/frps-user-*.toml 2>/dev/null | head -1 || true)
-        if [ -n "$existing_ip_user" ]; then
-            echo -e "${RED}>> IP ${STATIC_IP} đã dùng bởi: $(basename "$existing_ip_user" .toml)${NC}"; exit 1
-        fi
+        # ===== DEDICATED IP =====
+        read -p "IP public riêng của node: " STATIC_IP || { echo; exit 1; }
+        validate_ip "$STATIC_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
+        [ "$STATIC_IP" == "$BIND_IP" ] && { echo -e "${RED}>> Trùng IP VPS!${NC}"; exit 1; }
+
+        local existing_ip
+        existing_ip=$(grep -rlF "bindAddr = \"${STATIC_IP}\"" /etc/frp/frps-user-*.toml 2>/dev/null | head -1 || true)
+        [ -n "$existing_ip" ] && { echo -e "${RED}>> IP đã dùng bởi: $(basename "$existing_ip" .toml)${NC}"; exit 1; }
+
         if ! ip -4 addr show 2>/dev/null | grep -qF "$STATIC_IP"; then
-            echo -e "${YELLOW}>> Cảnh báo: IP ${STATIC_IP} chưa có trên VPS.${NC}"
-            read -p "Vẫn tiếp tục? (y/N): " ip_confirm || { echo; exit 1; }
-            [[ ! "$ip_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
+            echo -e "${YELLOW}>> IP ${STATIC_IP} chưa có trên VPS.${NC}"
+            read -p "Vẫn tiếp tục? (y/N): " ipc || { echo; exit 1; }
+            [[ ! "$ipc" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
         fi
 
-        local_base_ctrl=$(( ${VPS_CTRL_PORT:-7000} + 1 ))
-        USER_CTRL_PORT=$(calc_user_ctrl_port "$local_base_ctrl")
+        USER_CTRL_PORT=$(calc_user_ctrl_port "$(( ${VPS_CTRL_PORT:-7000} + 1 ))")
         echo -e "${CYAN}>> Control port: ${USER_CTRL_PORT}${NC}"
 
-        read -s -p "Auth Token [Enter = giống server]: " TOKEN_INPUT || { echo; }
-        echo
+        read -s -p "Auth Token [Enter = giống server]: " TOKEN_INPUT || { echo; }; echo
         AUTH_TOKEN_USER="${TOKEN_INPUT:-${AUTH_TOKEN:-}}"
-        if [ -z "$AUTH_TOKEN_USER" ]; then echo -e "${RED}>> Token không được trống.${NC}"; exit 1; fi
+        [ -z "$AUTH_TOKEN_USER" ] && { echo -e "${RED}>> Token trống.${NC}"; exit 1; }
 
         get_port_ranges "dedicated"
-        if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then echo -e "${RED}>> Chưa nhập dải port nào.${NC}"; exit 1; fi
+        [ "${#CUSTOM_RANGES[@]}" -eq 0 ] && { echo -e "${RED}>> Chưa nhập dải port.${NC}"; exit 1; }
 
         install_frp_core
 
-        VPS_CONF="/etc/frp/frps-user-${USERNAME}.toml"
+        # frps config cho dedicated
+        local VPS_CONF="/etc/frp/frps-user-${USERNAME}.toml"
         cat > "$VPS_CONF" <<EOF
 # === Node: ${USERNAME} | IP Riêng: ${STATIC_IP} ===
 # [meta]
@@ -771,8 +575,7 @@ token = "${AUTH_TOKEN_USER}"
 EOF
         chmod 600 "$VPS_CONF"
 
-        FRPS_SVC="frps-user-${USERNAME}"
-        cat > "/etc/systemd/system/${FRPS_SVC}.service" <<EOF
+        cat > "/etc/systemd/system/frps-user-${USERNAME}.service" <<EOF
 [Unit]
 Description=FRP Server — Node ${USERNAME} (${STATIC_IP})
 After=network.target
@@ -786,14 +589,13 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        if systemctl enable --now "$FRPS_SVC" 2>/dev/null; then
-            echo -e "${GREEN}>> frps ${FRPS_SVC} đã start.${NC}"
-        else
-            echo -e "${YELLOW}>> frps ${FRPS_SVC} chưa start được (IP chưa config?).${NC}"
-        fi
+        systemctl enable --now "frps-user-${USERNAME}" 2>/dev/null \
+            && echo -e "${GREEN}>> frps started.${NC}" \
+            || echo -e "${YELLOW}>> frps chưa start (IP chưa config?).${NC}"
 
-        NODE_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
-        WS_PORT=$(calc_ws_port "$LOCAL_IP")
+        # frpc config
+        local NODE_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
+        local WS_PORT; WS_PORT=$(calc_ws_port "$LOCAL_IP")
         cat > "$NODE_CONF" <<EOF
 # === frpc — Node: ${USERNAME} | IP Riêng ===
 serverAddr = "${STATIC_IP}"
@@ -809,7 +611,7 @@ port = ${WS_PORT}
 EOF
         chmod 600 "$NODE_CONF"
 
-        has_pp="n"
+        local has_pp="n"
         for r in "${CUSTOM_RANGES[@]}"; do
             IFS=':' read -r ps pe pp <<< "$r"
             write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$NODE_CONF" "$pp"
@@ -821,16 +623,14 @@ EOF
             echo -e "${CYAN}>> Mở firewall...${NC}"
             firewall_open_port "$USER_CTRL_PORT" "tcp"
             for r in "${CUSTOM_RANGES[@]}"; do
-                IFS=':' read -r ps pe _pp <<< "$r"
-                echo -e "${GREEN}   Đang mở dải ${ps}-${pe} (TCP & UDP)...${NC}"
-                for (( p=ps; p<=pe; p++ )); do
-                    firewall_open_port "$p" "tcp" "quiet"; firewall_open_port "$p" "udp" "quiet"
-                done
+                IFS=':' read -r ps pe _ <<< "$r"
+                echo -e "${GREEN}   Mở dải ${ps}-${pe}...${NC}"
+                open_port_range "$ps" "$pe"
             done
             firewall_reload_if_needed
         fi
 
-        echo -e "\n${GREEN}${BOLD}>> Node '${USERNAME}' đã tạo xong!${NC}"
+        echo -e "\n${GREEN}${BOLD}>> Node '${USERNAME}' đã tạo!${NC}"
         echo -e "${GREEN}   IP public : ${STATIC_IP}${NC}"
         echo -e "${GREEN}   Local IP  : ${LOCAL_IP}${NC}"
         echo -e "${GREEN}   CTRL Port : ${USER_CTRL_PORT}${NC}"
@@ -838,34 +638,34 @@ EOF
         echo -e "\n${CYAN}>> Dải port:${NC}"
         for r in "${CUSTOM_RANGES[@]}"; do
             IFS=':' read -r ps pe pp <<< "$r"
-            [ "$pp" == "y" ] && echo -e "   ${ps}-${pe}  [TCP PP v2 + UDP]" || echo -e "   ${ps}-${pe}  [TCP+UDP]"
+            [ "$pp" == "y" ] && echo -e "   ${ps}-${pe}  [TCP PP v2 + UDP]" \
+                              || echo -e "   ${ps}-${pe}  [TCP+UDP]"
         done
         [ "$has_pp" == "y" ] && show_pp_guide "$STATIC_IP"
         generate_node_install_script "$USERNAME"
-        log_action "ADD_NODE: ${USERNAME} (dedicated, IP=${STATIC_IP}, ctrl=${USER_CTRL_PORT})"
+        log_action "ADD_NODE: ${USERNAME} (dedicated, IP=${STATIC_IP})"
 
     else
-        # ============ SHARED IP ============
-        if ! systemctl is-active --quiet frps-main.service 2>/dev/null; then
-            echo -e "${YELLOW}>> Cảnh báo: frps-main chưa chạy — chạy option 1 trước.${NC}"
-            read -p "Vẫn tiếp tục? (y/N): " frps_confirm || { echo; exit 1; }
-            [[ ! "$frps_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
-        fi
+        # ===== SHARED IP =====
+        systemctl is-active --quiet frps-main.service 2>/dev/null || {
+            echo -e "${YELLOW}>> frps-main chưa chạy — chạy option 1 trước.${NC}"
+            read -p "Vẫn tiếp tục? (y/N): " fc || { echo; exit 1; }
+            [[ ! "$fc" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
+        }
 
-        SHARED_IP="${BIND_IP}"
-        CTRL_PORT="${VPS_CTRL_PORT:-7000}"
+        local SHARED_IP="${BIND_IP}" CTRL_PORT="${VPS_CTRL_PORT:-7000}"
 
-        read -s -p "Auth Token [Enter = giống server]: " TOKEN_INPUT || { echo; }
-        echo
+        read -s -p "Auth Token [Enter = giống server]: " TOKEN_INPUT || { echo; }; echo
         AUTH_TOKEN_USER="${TOKEN_INPUT:-${AUTH_TOKEN:-}}"
-        if [ -z "$AUTH_TOKEN_USER" ]; then echo -e "${RED}>> Token không được trống.${NC}"; exit 1; fi
+        [ -z "$AUTH_TOKEN_USER" ] && { echo -e "${RED}>> Token trống.${NC}"; exit 1; }
 
         get_port_ranges "shared"
-        if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then echo -e "${RED}>> Chưa nhập dải port nào.${NC}"; exit 1; fi
+        [ "${#CUSTOM_RANGES[@]}" -eq 0 ] && { echo -e "${RED}>> Chưa nhập dải port.${NC}"; exit 1; }
 
         install_frp_core
 
-        VPS_CONF="/etc/frp/frps-user-${USERNAME}.toml"
+        # frps meta (không chạy service riêng)
+        local VPS_CONF="/etc/frp/frps-user-${USERNAME}.toml"
         cat > "$VPS_CONF" <<EOF
 # === Node: ${USERNAME} | IP Chung: ${SHARED_IP} ===
 # [meta]
@@ -877,8 +677,8 @@ EOF
 EOF
         chmod 600 "$VPS_CONF"
 
-        NODE_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
-        WS_PORT=$(calc_ws_port "$LOCAL_IP")
+        local NODE_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
+        local WS_PORT; WS_PORT=$(calc_ws_port "$LOCAL_IP")
         cat > "$NODE_CONF" <<EOF
 # === frpc — Node: ${USERNAME} | IP Chung ===
 serverAddr = "${SHARED_IP}"
@@ -895,7 +695,7 @@ EOF
         chmod 600 "$NODE_CONF"
 
         for r in "${CUSTOM_RANGES[@]}"; do
-            IFS=':' read -r ps pe _pp <<< "$r"
+            IFS=':' read -r ps pe _ <<< "$r"
             write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$NODE_CONF" "n"
         done
 
@@ -903,22 +703,20 @@ EOF
         if [ "$FW" != "none" ]; then
             echo -e "${CYAN}>> Mở firewall...${NC}"
             for r in "${CUSTOM_RANGES[@]}"; do
-                IFS=':' read -r ps pe _pp <<< "$r"
-                echo -e "${GREEN}   Đang mở dải ${ps}-${pe} (TCP & UDP)...${NC}"
-                for (( p=ps; p<=pe; p++ )); do
-                    firewall_open_port "$p" "tcp" "quiet"; firewall_open_port "$p" "udp" "quiet"
-                done
+                IFS=':' read -r ps pe _ <<< "$r"
+                echo -e "${GREEN}   Mở dải ${ps}-${pe}...${NC}"
+                open_port_range "$ps" "$pe"
             done
             firewall_reload_if_needed
         fi
 
-        echo -e "\n${GREEN}${BOLD}>> Node '${USERNAME}' đã tạo xong!${NC}"
+        echo -e "\n${GREEN}${BOLD}>> Node '${USERNAME}' đã tạo!${NC}"
         echo -e "${GREEN}   IP VPS   : ${SHARED_IP}${NC}"
         echo -e "${GREEN}   Local IP : ${LOCAL_IP}${NC}"
         echo -e "${GREEN}   Config   : ${NODE_CONF}${NC}"
         echo -e "\n${CYAN}>> Dải port (TCP+UDP):${NC}"
         for r in "${CUSTOM_RANGES[@]}"; do
-            IFS=':' read -r ps pe _pp <<< "$r"
+            IFS=':' read -r ps pe _ <<< "$r"
             echo -e "   ${ps}-${pe}"
         done
         generate_node_install_script "$USERNAME"
@@ -927,80 +725,62 @@ EOF
     ;;
 
 # ==============================================
-# --- 3. (Đã gộp vào option 2) ---
+# 3. (Đã gộp vào option 2)
 # ==============================================
 3)
-    echo -e "${YELLOW}>> Option 3 đã gộp vào option 2. Dùng option 2 để thêm Node.${NC}"
-    exit 0
+    echo -e "${YELLOW}>> Option 3 đã gộp vào option 2.${NC}"; exit 0
     ;;
 
 # ==============================================
-# --- 4. CÀI FRP CLIENT (Node) ---
+# 4. CÀI FRP CLIENT (Node)
 # ==============================================
 4)
     echo -e "\n${CYAN}${BOLD}--- Cài FRP Client trên Node ---${NC}"
-    echo -e "  ${YELLOW}Chạy option này trên Node sau khi đã thêm node trên VPS.${NC}\n"
-
-    echo -e "${YELLOW}Bạn có thể cài đặt bằng 2 cách:${NC}"
-    echo -e "  1. Chọn file cấu hình đã tạo sẵn (nếu deploy tự động / copy từ VPS)"
-    echo -e "  2. Nhập cấu hình hoàn toàn bằng tay (Cách cũ)"
+    echo -e "  ${YELLOW}Chạy sau khi đã thêm node trên VPS (option 2).${NC}\n"
+    echo -e "  1. Dùng file config sẵn (deploy tự động / copy từ VPS)"
+    echo -e "  2. Nhập cấu hình thủ công"
     read -p "Chọn cách [1/2]: " install_method || { echo; exit 1; }
 
     if [ "$install_method" == "2" ]; then
-        echo -e "\n${CYAN}--- Nhập cấu hình bằng tay ---${NC}"
-        read -p "Tên node (vd: node01): " USERNAME || { echo; exit 1; }
+        echo -e "\n${CYAN}--- Nhập thủ công ---${NC}"
+        read -p "Tên node: " USERNAME || { echo; exit 1; }
         USERNAME="${USERNAME//[^a-zA-Z0-9_-]/-}"
-        if [ -z "$USERNAME" ]; then echo -e "${RED}>> Tên không hợp lệ.${NC}"; exit 1; fi
+        [ -z "$USERNAME" ] && { echo -e "${RED}>> Tên trống.${NC}"; exit 1; }
 
-        read -p "IP VPS (Server FRP): " VPS_IP || { echo; exit 1; }
-        if ! validate_ip "$VPS_IP"; then echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; fi
+        read -p "IP VPS: " VPS_IP || { echo; exit 1; }
+        validate_ip "$VPS_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
 
-        read -p "Control Port VPS [7000]: " CTRL_PORT || { echo; exit 1; }
+        read -p "Control Port [7000]: " CTRL_PORT || { echo; exit 1; }
         CTRL_PORT=${CTRL_PORT:-7000}
 
-        read -s -p "Auth Token: " AUTH_TOKEN_USER || { echo; exit 1; }
-        echo
-        if [ -z "$AUTH_TOKEN_USER" ]; then echo -e "${RED}>> Token không được trống.${NC}"; exit 1; fi
+        read -s -p "Auth Token: " AUTH_TOKEN_USER || { echo; exit 1; }; echo
+        [ -z "$AUTH_TOKEN_USER" ] && { echo -e "${RED}>> Token trống.${NC}"; exit 1; }
 
-        read -p "IP server game trên Node [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
+        read -p "IP server game [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
         LOCAL_IP=${LOCAL_IP:-127.0.0.1}
 
-        echo -e "\n${CYAN}Proxy Protocol (PP v2):${NC}"
-        echo -e "  Chỉ bật (y) nếu bạn kết nối BungeeCord/Velocity tới IP public riêng."
-        echo -e "  (Nếu dùng IP chung, hoặc game Bedrock, hãy chọn N)."
-        read -p "Có dùng PP v2 không? (y/N): " USE_PP || { echo; exit 1; }
-        if [[ "$USE_PP" =~ ^[Yy]$ ]]; then
-            use_pp="y"
-        else
-            use_pp="n"
-        fi
+        echo -e "\n${CYAN}PP v2: Chỉ bật nếu BungeeCord/Velocity + IP riêng.${NC}"
+        read -p "Bật PP v2? (y/N): " USE_PP || { echo; exit 1; }
+        [[ "$USE_PP" =~ ^[Yy]$ ]] && use_pp="y" || use_pp="n"
 
         CUSTOM_RANGES=()
         while true; do
-            read -p "Thêm dải port mới? (y/N): " add_more || { echo; break; }
-            [[ ! "$add_more" =~ ^[Yy]$ ]] && break
-            read -p "  Port bắt đầu: " p_s || { echo; break; }
-            read -p "  Port kết thúc: " p_e || { echo; break; }
-            if ! validate_port "$p_s" || ! validate_port "$p_e"; then
-                echo -e "${RED}  >> Lỗi: Port không hợp lệ!${NC}"; continue
-            fi
-            if [ "$p_e" -lt "$p_s" ]; then
-                echo -e "${RED}  >> Lỗi: Port kết thúc phải >= Port bắt đầu!${NC}"; continue
-            fi
+            read -p "Thêm dải port? (y/N): " am || { echo; break; }
+            [[ ! "$am" =~ ^[Yy]$ ]] && break
+            read -p "  Bắt đầu: " p_s || { echo; break; }
+            read -p "  Kết thúc: " p_e || { echo; break; }
+            validate_port "$p_s" && validate_port "$p_e" || { echo -e "${RED}  >> Port không hợp lệ!${NC}"; continue; }
+            [ "$p_e" -lt "$p_s" ] && { echo -e "${RED}  >> Kết thúc phải >= bắt đầu!${NC}"; continue; }
             CUSTOM_RANGES+=("${p_s}:${p_e}:${use_pp}")
         done
+        [ "${#CUSTOM_RANGES[@]}" -eq 0 ] && { echo -e "${RED}>> Cần ít nhất 1 dải port.${NC}"; exit 1; }
 
-        if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then
-            echo -e "${RED}>> Phải có ít nhất 1 dải port.${NC}"; exit 1
-        fi
-
-        SELECTED_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
-        WS_PORT=$(calc_ws_port "$LOCAL_IP")
-
+        local SELECTED_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
+        local WS_PORT; WS_PORT=$(calc_ws_port "$LOCAL_IP")
         install_frp_core
 
         cat > "$SELECTED_CONF" <<EOF
-# === frpc — Node: ${USERNAME} (Manual Install) ===
+# === frpc — Node: ${USERNAME} (Manual) ===
 serverAddr = "${VPS_IP}"
 serverPort = ${CTRL_PORT}
 
@@ -1013,61 +793,45 @@ addr = "127.0.0.1"
 port = ${WS_PORT}
 EOF
         chmod 600 "$SELECTED_CONF"
-
         for r in "${CUSTOM_RANGES[@]}"; do
             IFS=':' read -r ps pe pp <<< "$r"
             write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$SELECTED_CONF" "$pp"
         done
-
-        echo -e "${GREEN}>> Đã tạo cấu hình thủ công tại $SELECTED_CONF${NC}"
+        echo -e "${GREEN}>> Config tạo tại $SELECTED_CONF${NC}"
 
     else
-        # --- Cách 1: Tìm config có sẵn ---
         mapfile -t FRPC_CONFS < <(find /etc/frp -maxdepth 1 -name "frpc-user-*.toml" 2>/dev/null | sort)
-
         if [ "${#FRPC_CONFS[@]}" -eq 0 ] || [ -z "${FRPC_CONFS[0]:-}" ]; then
-            echo -e "${YELLOW}>> Không tìm thấy file config frpc nào trong /etc/frp/.${NC}"
-            echo -e "${YELLOW}   Hãy chọn cách 2 (Nhập thủ công) hoặc dùng lệnh Deploy tự động từ VPS.${NC}"
-            exit 1
+            echo -e "${YELLOW}>> Không tìm thấy config nào. Dùng cách 2 hoặc deploy từ VPS.${NC}"; exit 1
         fi
 
-        echo -e "${CYAN}Chọn user cần cài frpc:${NC}"
+        echo -e "${CYAN}Chọn user:${NC}"
         for i in "${!FRPC_CONFS[@]}"; do
-            frpc_fname=$(basename "${FRPC_CONFS[$i]}" .toml)
-            frpc_uname="${frpc_fname#frpc-user-}"
-            frpc_svc_status=$(systemctl is-active "frpc-user-${frpc_uname}.service" 2>/dev/null || echo "chưa cài")
-            echo -e "  ${YELLOW}$((i+1)).${NC} ${frpc_uname} [${frpc_svc_status}]"
+            local u="${FRPC_CONFS[$i]##*/frpc-user-}"; u="${u%.toml}"
+            local st; st=$(systemctl is-active "frpc-user-${u}.service" 2>/dev/null || echo "chưa cài")
+            echo -e "  ${YELLOW}$((i+1)).${NC} ${u} [${st}]"
         done
-
         read -p "Chọn số: " fidx || { echo; exit 1; }
-        if ! validate_index "$fidx" "${#FRPC_CONFS[@]}"; then
-            echo -e "${RED}>> Lựa chọn không hợp lệ.${NC}"; exit 1
-        fi
-        SELECTED_CONF="${FRPC_CONFS[$((fidx-1))]}"
-        if [ ! -f "$SELECTED_CONF" ]; then
-            echo -e "${RED}>> File config không tồn tại.${NC}"; exit 1
-        fi
-        
+        validate_index "$fidx" "${#FRPC_CONFS[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
+        local SELECTED_CONF="${FRPC_CONFS[$((fidx-1))]}"
+        [ ! -f "$SELECTED_CONF" ] && { echo -e "${RED}>> File không tồn tại.${NC}"; exit 1; }
         install_frp_core
     fi
 
-    SEL_FNAME=$(basename "$SELECTED_CONF" .toml)
-    SEL_USER="${SEL_FNAME#frpc-user-}"
+    local SEL_USER="${SELECTED_CONF##*/frpc-user-}"; SEL_USER="${SEL_USER%.toml}"
 
-    # Verify config nếu FRP >= 0.52
     parse_frp_version "/usr/local/bin/frpc"
     if frp_ver_gte_052 "$FRP_MAJOR" "$FRP_MINOR"; then
-        if /usr/local/bin/frpc verify -c "$SELECTED_CONF" >/dev/null 2>&1; then
-            echo -e "${GREEN}>> Config verify OK.${NC}"
+        if ! /usr/local/bin/frpc verify -c "$SELECTED_CONF" >/dev/null 2>&1; then
+            echo -e "${YELLOW}>> Cảnh báo: frpc verify thất bại.${NC}"
+            read -p "Vẫn tiếp tục? (y/N): " vc || { echo; exit 1; }
+            [[ ! "$vc" =~ ^[Yy]$ ]] && exit 1
         else
-            echo -e "${YELLOW}>> Cảnh báo: frpc verify phát hiện vấn đề với config.${NC}"
-            echo -e "${YELLOW}   Kiểm tra lại file: ${SELECTED_CONF}${NC}"
-            read -p "Vẫn tiếp tục? (y/N): " verify_confirm || { echo; exit 1; }
-            [[ ! "$verify_confirm" =~ ^[Yy]$ ]] && exit 1
+            echo -e "${GREEN}>> Config verify OK.${NC}"
         fi
     fi
 
-    SVC="frpc-user-${SEL_USER}"
+    local SVC="frpc-user-${SEL_USER}"
     cat > "/etc/systemd/system/${SVC}.service" <<EOF
 [Unit]
 Description=FRP Client — User ${SEL_USER}
@@ -1081,216 +845,167 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl daemon-reload
     systemctl enable --now "$SVC"
 
-    echo -e ""
-    echo -e "${GREEN}${BOLD}>> frpc cho user '${SEL_USER}' đã chạy!${NC}"
+    echo -e "\n${GREEN}${BOLD}>> frpc '${SEL_USER}' đã chạy!${NC}"
     echo -e "${GREEN}   Service : ${SVC}${NC}"
     echo -e "${GREEN}   Config  : ${SELECTED_CONF}${NC}"
-
-    echo -e ""
-    echo -e "${CYAN}>> Lệnh hot-reload (không kick player):${NC}"
+    echo -e "\n${CYAN}>> Hot-reload (không kick player):${NC}"
     if frp_ver_gte_052 "$FRP_MAJOR" "$FRP_MINOR"; then
         echo -e "${CYAN}   frpc reload -c ${SELECTED_CONF}${NC}"
     else
-        WS=$(grep -A2 "webServer" "$SELECTED_CONF" | grep "port" | grep -oE '[0-9]+' | head -1) || true
+        local WS; WS=$(grep -A2 "webServer" "$SELECTED_CONF" | grep "port" | grep -oE '[0-9]+' | head -1 || true)
         echo -e "${CYAN}   frpc reload --server_addr 127.0.0.1 --server_port ${WS:-40000}${NC}"
     fi
     ;;
 
 # ==============================================
-# --- 5. DANH SÁCH USER ---
+# 5. DANH SÁCH
 # ==============================================
 5)
     list_users
     ;;
 
 # ==============================================
-# --- 6. RESTART SERVICE ---
+# 6. RESTART SERVICE
 # ==============================================
 6)
     echo -e "\n${CYAN}${BOLD}--- Restart Service ---${NC}"
 
     mapfile -t SVC_LIST < <(
-        {
-            systemctl list-units --all --no-legend 2>/dev/null \
-                | awk '{print $1}' | grep -E '^frps-main\.service$' || true
-            systemctl list-units --all --no-legend 2>/dev/null \
-                | awk '{print $1}' | grep -E '^frp[sc]-user-.*\.service$' || true
-        } | sort -u | grep -v '^$'
+        systemctl list-units --all --no-legend 2>/dev/null | awk '{print $1}' \
+            | grep -E '^(frps-main|frp[sc]-user-.+)\.service$' | sort -u || true
     )
+    # Lọc rỗng
+    local temp=()
+    for s in "${SVC_LIST[@]+"${SVC_LIST[@]}"}"; do [[ -n "$s" ]] && temp+=("$s"); done
+    SVC_LIST=("${temp[@]+"${temp[@]}"}")
 
-    # Lọc phần tử rỗng
-    temp_svcs=()
-    for s in "${SVC_LIST[@]+"${SVC_LIST[@]}"}"; do
-        [[ -n "$s" ]] && temp_svcs+=("$s")
-    done
-    SVC_LIST=("${temp_svcs[@]+"${temp_svcs[@]}"}")
-
-    if [ "${#SVC_LIST[@]}" -eq 0 ]; then
-        echo -e "${YELLOW}>> Không tìm thấy service FRP nào.${NC}"; exit 0
-    fi
+    [ "${#SVC_LIST[@]}" -eq 0 ] && { echo -e "${YELLOW}>> Không tìm thấy service FRP.${NC}"; exit 0; }
 
     echo -e "${CYAN}Danh sách service:${NC}"
     for i in "${!SVC_LIST[@]}"; do
-        svc="${SVC_LIST[$i]}"
-        status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
-        status_color="$GREEN"; [ "$status" != "active" ] && status_color="$RED"
-        echo -e "  ${YELLOW}$((i+1)).${NC} ${svc} — ${status_color}${status}${NC}"
+        local st; st=$(systemctl is-active "${SVC_LIST[$i]}" 2>/dev/null || echo "unknown")
+        local sc="$GREEN"; [ "$st" != "active" ] && sc="$RED"
+        echo -e "  ${YELLOW}$((i+1)).${NC} ${SVC_LIST[$i]} — ${sc}${st}${NC}"
     done
     echo -e "  ${YELLOW}0.${NC} Restart TẤT CẢ"
 
-    read -p "Chọn số (0 = tất cả): " ridx || { echo; exit 1; }
+    read -p "Chọn số (0=tất cả): " ridx || { echo; exit 1; }
 
     if [ "$ridx" == "0" ]; then
-        echo -e "${CYAN}>> Restart tất cả FRP services...${NC}"
         for svc in "${SVC_LIST[@]}"; do
-            if systemctl restart "$svc" 2>/dev/null; then
-                echo -e "${GREEN}   ✓ ${svc}${NC}"
-            else
-                echo -e "${RED}   ✗ ${svc} — thất bại${NC}"
-            fi
+            systemctl restart "$svc" 2>/dev/null \
+                && echo -e "${GREEN}   ✓ ${svc}${NC}" \
+                || echo -e "${RED}   ✗ ${svc}${NC}"
         done
-        echo -e "${GREEN}${BOLD}>> Hoàn tất!${NC}"
+        echo -e "${GREEN}${BOLD}>> Xong!${NC}"
     else
-        if ! validate_index "$ridx" "${#SVC_LIST[@]}"; then
-            echo -e "${RED}>> Lựa chọn không hợp lệ.${NC}"; exit 1
-        fi
-        RSVC="${SVC_LIST[$((ridx-1))]}"
-        if systemctl restart "$RSVC" 2>/dev/null; then
-            echo -e "${GREEN}>> Đã restart ${RSVC}.${NC}"
-        else
-            echo -e "${RED}>> Restart ${RSVC} thất bại. Kiểm tra: journalctl -u ${RSVC}${NC}"
-            exit 1
-        fi
+        validate_index "$ridx" "${#SVC_LIST[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
+        local RSVC="${SVC_LIST[$((ridx-1))]}"
+        systemctl restart "$RSVC" 2>/dev/null \
+            && echo -e "${GREEN}>> Đã restart ${RSVC}.${NC}" \
+            || { echo -e "${RED}>> Thất bại. Xem: journalctl -u ${RSVC}${NC}"; exit 1; }
     fi
     ;;
 
 # ==============================================
-# --- 7. XÓA USER ---
-# (Bao gồm cleanup firewall rules)
+# 7. XÓA USER
 # ==============================================
 7)
-    echo -e "\n${RED}${BOLD}--- Xóa User ---${NC}"
+    echo -e "\n${RED}${BOLD}--- Xóa Node ---${NC}"
 
     mapfile -t USER_LIST < <(
         find /etc/frp -maxdepth 1 -name "frps-user-*.toml" 2>/dev/null \
-            | xargs -n1 basename 2>/dev/null \
-            | sed 's/frps-user-//;s/\.toml//' \
-            | sort || true
+            | xargs -n1 basename 2>/dev/null | sed 's/frps-user-//;s/\.toml//' | sort || true
     )
+    local temp=()
+    for u in "${USER_LIST[@]+"${USER_LIST[@]}"}"; do [[ -n "$u" ]] && temp+=("$u"); done
+    USER_LIST=("${temp[@]+"${temp[@]}"}")
 
-    # Lọc phần tử rỗng
-    temp_users=()
-    for u in "${USER_LIST[@]+"${USER_LIST[@]}"}"; do
-        [[ -n "$u" ]] && temp_users+=("$u")
-    done
-    USER_LIST=("${temp_users[@]+"${temp_users[@]}"}")
-
-    if [ "${#USER_LIST[@]}" -eq 0 ]; then
-        echo -e "${YELLOW}>> Không tìm thấy user nào.${NC}"; exit 0
-    fi
+    [ "${#USER_LIST[@]}" -eq 0 ] && { echo -e "${YELLOW}>> Không có user nào.${NC}"; exit 0; }
 
     echo -e "${CYAN}Danh sách user:${NC}"
-    for i in "${!USER_LIST[@]}"; do
-        echo -e "  ${YELLOW}$((i+1)).${NC} ${USER_LIST[$i]}"
-    done
+    for i in "${!USER_LIST[@]}"; do echo -e "  ${YELLOW}$((i+1)).${NC} ${USER_LIST[$i]}"; done
 
     read -p "Chọn số user cần xóa: " didx || { echo; exit 1; }
-    if ! validate_index "$didx" "${#USER_LIST[@]}"; then
-        echo -e "${RED}>> Lựa chọn không hợp lệ.${NC}"; exit 1
-    fi
-    DEL_USER="${USER_LIST[$((didx-1))]}"
+    validate_index "$didx" "${#USER_LIST[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
+    local DEL_USER="${USER_LIST[$((didx-1))]}"
 
-    read -p "$(echo -e "${RED}>> Xác nhận xóa user '${DEL_USER}'? (y/N): ${NC}")" confirm_del || { echo; exit 1; }
-    [[ ! "$confirm_del" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
+    read -p "$(echo -e "${RED}>> Xác nhận xóa '${DEL_USER}'? (y/N): ${NC}")" cd || { echo; exit 1; }
+    [[ ! "$cd" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
 
-    # --- Cleanup firewall rules trước khi xóa config ---
-    FRPC_DEL_CONF="/etc/frp/frpc-user-${DEL_USER}.toml"
-    FRPS_DEL_CONF="/etc/frp/frps-user-${DEL_USER}.toml"
+    local FRPC_DEL="/etc/frp/frpc-user-${DEL_USER}.toml"
+    local FRPS_DEL="/etc/frp/frps-user-${DEL_USER}.toml"
+
     FW=$(detect_firewall)
-    if [ "$FW" != "none" ] && [ -f "$FRPC_DEL_CONF" ]; then
-        echo -e "${CYAN}>> Đóng firewall ports của user ${DEL_USER}...${NC}"
-        DEL_PORTS=$(extract_ports_from_config "$FRPC_DEL_CONF")
-        for dp in $DEL_PORTS; do
+    if [ "$FW" != "none" ] && [ -f "$FRPC_DEL" ]; then
+        echo -e "${CYAN}>> Đóng firewall ports...${NC}"
+        for dp in $(extract_ports_from_config "$FRPC_DEL"); do
             firewall_close_port "$dp" "tcp" "quiet"
             firewall_close_port "$dp" "udp" "quiet"
         done
-        echo -e "${YELLOW}   [Firewall] Đã đóng các port cũ của user ${DEL_USER}.${NC}"
-        # Đóng control port nếu là dedicated user
-        if [ -f "$FRPS_DEL_CONF" ] && grep -qF "bindPort" "$FRPS_DEL_CONF" 2>/dev/null; then
-            DEL_CTRL_PORT=$(awk '/^bindPort/{print $NF}' "$FRPS_DEL_CONF" | head -1)
-            if [ -n "${DEL_CTRL_PORT:-}" ]; then
-                firewall_close_port "$DEL_CTRL_PORT" "tcp"
-            fi
+        # Đóng control port nếu dedicated
+        if [ -f "$FRPS_DEL" ]; then
+            local dcp; dcp=$(awk '/^bindPort/{print $NF}' "$FRPS_DEL" 2>/dev/null | head -1)
+            [ -n "${dcp:-}" ] && firewall_close_port "$dcp" "tcp"
         fi
         firewall_reload_if_needed
+        echo -e "${YELLOW}   Đã đóng ports của ${DEL_USER}.${NC}"
     fi
 
-    # --- Stop/disable services ---
     for svc_type in frps frpc; do
-        SVC="${svc_type}-user-${DEL_USER}.service"
+        local SVC="${svc_type}-user-${DEL_USER}.service"
         if systemctl list-units --all --no-legend 2>/dev/null | grep -qF "$SVC"; then
             systemctl stop "$SVC" 2>/dev/null || true
             systemctl disable "$SVC" 2>/dev/null || true
             rm -f "/etc/systemd/system/${SVC}"
-            echo -e "${GREEN}>> Đã xóa service ${SVC}.${NC}"
+            echo -e "${GREEN}>> Xóa service ${SVC}.${NC}"
         fi
     done
 
-    rm -f "$FRPS_DEL_CONF"
-    rm -f "$FRPC_DEL_CONF"
-    echo -e "${GREEN}>> Đã xóa config files.${NC}"
-
+    rm -f "$FRPS_DEL" "$FRPC_DEL"
     systemctl daemon-reload
-    echo -e "${GREEN}${BOLD}>> Đã xóa user '${DEL_USER}' thành công.${NC}"
-    log_action "DELETE_USER: ${DEL_USER}"
+    echo -e "${GREEN}${BOLD}>> Đã xóa '${DEL_USER}'.${NC}"
+    log_action "DELETE_NODE: ${DEL_USER}"
     ;;
 
 # ==============================================
-# --- 8. XÓA SẠCH TOÀN BỘ ---
+# 8. XÓA SẠCH
 # ==============================================
 8)
     echo -e "\n${RED}${BOLD}=== XÓA SẠCH TOÀN BỘ ===${NC}"
     echo -e "${RED}>> CẢNH BÁO: Xóa TẤT CẢ service và config FRP!${NC}"
-    read -p "Xác nhận? (y/N): " confirm_all || { echo; exit 0; }
-    [[ ! "$confirm_all" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
+    read -p "Xác nhận? (y/N): " ca || { echo; exit 0; }
+    [[ ! "$ca" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
 
     mapfile -t ALL_SVCS < <(
-        systemctl list-units --all --no-legend 2>/dev/null \
-            | awk '{print $1}' \
-            | grep -E '^frps-|^frpc-' \
-            | grep '\.service$' || true
+        systemctl list-units --all --no-legend 2>/dev/null | awk '{print $1}' \
+            | grep -E '^frp[sc]-.+\.service$' || true
     )
-
     for s in "${ALL_SVCS[@]+"${ALL_SVCS[@]}"}"; do
         [ -z "$s" ] && continue
         echo -e "${YELLOW}>> Xóa: ${s}${NC}"
-        systemctl stop "$s"  2>/dev/null || true
+        systemctl stop "$s" 2>/dev/null || true
         systemctl disable "$s" 2>/dev/null || true
         rm -f "/etc/systemd/system/${s}"
     done
 
-    # --- Cleanup firewall trước khi xóa config ---
     FW=$(detect_firewall)
     if [ "$FW" != "none" ]; then
-        echo -e "${CYAN}>> Đóng tất cả firewall ports của FRP...${NC}"
+        echo -e "${CYAN}>> Đóng tất cả ports FRP...${NC}"
         for conf in /etc/frp/frpc-user-*.toml; do
             [ -f "$conf" ] || continue
-            CLEANUP_PORTS=$(extract_ports_from_config "$conf")
-            for cp in $CLEANUP_PORTS; do
+            for cp in $(extract_ports_from_config "$conf"); do
                 firewall_close_port "$cp" "tcp" "quiet"
                 firewall_close_port "$cp" "udp" "quiet"
             done
-            echo -e "${YELLOW}   [Firewall] Đã đóng các port cũ của user $(basename "$conf" .toml | sed 's/frpc-user-//').${NC}"
         done
-        # Đóng control ports từ frps configs
         for conf in /etc/frp/frps-user-*.toml /etc/frp/frps-main.toml; do
             [ -f "$conf" ] || continue
-            CTRL_P=$(awk '/^bindPort/{print $NF}' "$conf" 2>/dev/null | head -1)
-            [ -n "${CTRL_P:-}" ] && firewall_close_port "$CTRL_P" "tcp"
+            local cp; cp=$(awk '/^bindPort/{print $NF}' "$conf" 2>/dev/null | head -1)
+            [ -n "${cp:-}" ] && firewall_close_port "$cp" "tcp"
         done
         firewall_reload_if_needed
     fi
@@ -1298,53 +1013,36 @@ EOF
     rm -rf /etc/frp
     systemctl daemon-reload
 
-    read -p "Xóa binary FRP? (y/N): " del_bin || { echo; }
-    if [[ "${del_bin:-}" =~ ^[Yy]$ ]]; then
-        rm -f /usr/local/bin/frps /usr/local/bin/frpc
-        echo -e "${GREEN}>> Đã xóa binary FRP.${NC}"
-    fi
+    read -p "Xóa binary FRP? (y/N): " db || { echo; }
+    [[ "${db:-}" =~ ^[Yy]$ ]] && rm -f /usr/local/bin/frps /usr/local/bin/frpc \
+        && echo -e "${GREEN}>> Đã xóa binary.${NC}"
 
-    echo -e "${RED}${BOLD}>> ĐÃ XÓA SẠCH TOÀN BỘ!${NC}"
-    log_action "CLEAN_ALL: xóa toàn bộ FRP configs và services"
+    echo -e "${RED}${BOLD}>> ĐÃ XÓA SẠCH!${NC}"
+    log_action "CLEAN_ALL"
     ;;
 
 # ==============================================
-# --- 9. UPDATE FRP BINARY ---
+# 9. UPDATE FRP BINARY
 # ==============================================
 9)
     echo -e "\n${CYAN}${BOLD}--- Update FRP Binary ---${NC}"
-    if /usr/local/bin/frpc --version >/dev/null 2>&1; then
-        OLD_VER=$(/usr/local/bin/frpc --version 2>/dev/null)
-        echo -e "${YELLOW}>> Version hiện tại: ${OLD_VER}${NC}"
-    else
-        echo -e "${YELLOW}>> Chưa cài FRP binary.${NC}"
-    fi
+    local OLD_VER=""
+    /usr/local/bin/frpc --version >/dev/null 2>&1 \
+        && OLD_VER=$(/usr/local/bin/frpc --version 2>/dev/null) \
+        && echo -e "${YELLOW}>> Hiện tại: ${OLD_VER}${NC}" \
+        || echo -e "${YELLOW}>> Chưa cài.${NC}"
 
-    echo -e "${YELLOW}>> Sẽ tải và cài đặt FRP mới nhất từ GitHub.${NC}"
-    read -p "Tiếp tục? (y/N): " upd_confirm || { echo; exit 1; }
-    [[ ! "$upd_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Đã huỷ.${NC}"; exit 0; }
+    read -p "Tiếp tục update? (y/N): " uc || { echo; exit 1; }
+    [[ ! "$uc" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
 
     install_frp_core "force"
-
-    NEW_VER=$(/usr/local/bin/frpc --version 2>/dev/null || echo "unknown")
-    echo -e "${GREEN}${BOLD}>> Update hoàn tất! Version: ${NEW_VER}${NC}"
+    local NEW_VER; NEW_VER=$(/usr/local/bin/frpc --version 2>/dev/null || echo "unknown")
+    echo -e "${GREEN}${BOLD}>> Xong! Version: ${NEW_VER}${NC}"
+    echo -e "${YELLOW}>> Nên restart tất cả services (option 6 → 0).${NC}"
     log_action "UPDATE_FRP: ${OLD_VER:-none} -> ${NEW_VER}"
-
-    echo -e "${YELLOW}>> Bạn nên restart tất cả FRP services (option 6 → 0).${NC}"
     ;;
 
-# ==============================================
-# --- 0. THOÁT ---
-# ==============================================
-0)
-    echo -e "${YELLOW}>> Thoát.${NC}"; exit 0
-    ;;
-
-# ==============================================
-# --- DEFAULT ---
-# ==============================================
-*)
-    echo -e "${RED}>> Lựa chọn không hợp lệ.${NC}"; exit 1
-    ;;
+0)  echo -e "${YELLOW}>> Thoát.${NC}"; exit 0 ;;
+*)  echo -e "${RED}>> Lựa chọn không hợp lệ.${NC}"; exit 1 ;;
 
 esac
