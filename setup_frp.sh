@@ -51,14 +51,20 @@ load_server_meta() {
 validate_ip() {
     local ip="$1"
     [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
-    local oct; for oct in "${BASH_REMATCH[@]:1}"; do (( oct > 255 )) && return 1; done
+    local oct
+    for oct in "${BASH_REMATCH[@]:1}"; do
+        [ "$oct" -gt 255 ] && return 1 || true
+    done
+    return 0
 }
 
-validate_port()  { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+validate_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ] && return 0 || return 1
+}
 
 validate_index() {
     local input="$1" max="$2"
-    [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input <= max ))
+    [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input <= max )) && return 0 || return 1
 }
 
 # ==============================================
