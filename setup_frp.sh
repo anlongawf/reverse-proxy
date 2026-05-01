@@ -144,18 +144,18 @@ parse_frp_version() {
 # Function: Mở firewall
 # ==============================================
 firewall_open_port() {
-    local port=$1 proto=${2:-tcp}
+    local port=$1 proto=${2:-tcp} quiet=${3:-}
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
         ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
-        echo -e "${GREEN}   [UFW] Mở ${port}/${proto}${NC}"
+        [ "$quiet" != "quiet" ] && echo -e "${GREEN}   [UFW] Mở ${port}/${proto}${NC}"
     elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
         firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || true
-        echo -e "${GREEN}   [FirewallD] Mở ${port}/${proto}${NC}"
+        [ "$quiet" != "quiet" ] && echo -e "${GREEN}   [FirewallD] Mở ${port}/${proto}${NC}"
         FIREWALLD_RELOAD=1
     elif command -v iptables >/dev/null 2>&1; then
         if ! iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
             iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
-            echo -e "${GREEN}   [iptables] Mở ${port}/${proto}${NC}"
+            [ "$quiet" != "quiet" ] && echo -e "${GREEN}   [iptables] Mở ${port}/${proto}${NC}"
         fi
     fi
 }
@@ -164,17 +164,17 @@ firewall_open_port() {
 # Function: Đóng firewall port
 # ==============================================
 firewall_close_port() {
-    local port=$1 proto=${2:-tcp}
+    local port=$1 proto=${2:-tcp} quiet=${3:-}
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
         ufw delete allow "${port}/${proto}" >/dev/null 2>&1 || true
-        echo -e "${YELLOW}   [UFW] Đóng ${port}/${proto}${NC}"
+        [ "$quiet" != "quiet" ] && echo -e "${YELLOW}   [UFW] Đóng ${port}/${proto}${NC}"
     elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
         firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1 || true
-        echo -e "${YELLOW}   [FirewallD] Đóng ${port}/${proto}${NC}"
+        [ "$quiet" != "quiet" ] && echo -e "${YELLOW}   [FirewallD] Đóng ${port}/${proto}${NC}"
         FIREWALLD_RELOAD=1
     elif command -v iptables >/dev/null 2>&1; then
         iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || true
-        echo -e "${YELLOW}   [iptables] Đóng ${port}/${proto}${NC}"
+        [ "$quiet" != "quiet" ] && echo -e "${YELLOW}   [iptables] Đóng ${port}/${proto}${NC}"
     fi
 }
 
@@ -459,28 +459,26 @@ show_pp_guide() {
 }
 
 # ==============================================
-# show_node_guide — hướng dẫn cài client trên Node
+# generate_node_install_script — Lệnh cài tự động
 # ==============================================
-show_node_guide() {
-    local uname=$1 local_ip=$2 vps_ip=$3 ctrl_port=$4 token=$5
-    local masked_token
-    if [ "${#token}" -gt 8 ]; then
-        masked_token="${token:0:4}****${token: -4}"
-    else
-        masked_token="****"
+generate_node_install_script() {
+    local uname="$1"
+    local conf="/etc/frp/frpc-user-${uname}.toml"
+    if [ ! -f "$conf" ]; then
+        return 1
     fi
-    local W=62
-    echo -e ""
-    echo -e "${YELLOW}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
-    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "🖥️  TIẾP THEO: SSH vào Node và chạy script này"
+    
+    local b64
+    b64=$(base64 -w0 "$conf")
+    
+    local W=68
+    echo -e "\n${YELLOW}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
+    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "🚀 LỆNH CÀI ĐẶT NHANH CHO NODE (COPY & PASTE TRÊN SSH NODE)"
     printf "${YELLOW}║  %-$((W-2))s║${NC}\n" ""
-    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "Chọn option 4 trên Node, dùng thông tin:"
-    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Node"     "${uname}"
-    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "VPS IP"   "${vps_ip}"
-    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Port"     "${ctrl_port}"
-    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Token"    "${masked_token} (xem file config)"
-    printf "${YELLOW}║    %-10s: %-$((W-16))s║${NC}\n" "Local IP" "${local_ip}"
-    echo -e "${YELLOW}╚$(printf '═%.0s' $(seq 1 "$W"))╝${NC}"
+    printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "Chạy toàn bộ khối lệnh dưới đây trên Node (quyền root):"
+    echo -e "${YELLOW}╚$(printf '═%.0s' $(seq 1 "$W"))╝${NC}\n"
+    
+    echo -e "${GREEN}mkdir -p /etc/frp && echo \"${b64}\" | base64 -d > \"/etc/frp/frpc-user-${uname}.toml\" && chmod 600 \"/etc/frp/frpc-user-${uname}.toml\" && echo -e \"\\n\\e[32m[+] Config lưu tại /etc/frp/frpc-user-${uname}.toml\\e[0m\\n\\e[33m[!] Hãy chạy script setup_frp.sh -> chọn Option 4 -> Chọn Cách 1\\e[0m\"${NC}\n"
 }
 
 
@@ -824,8 +822,9 @@ EOF
             firewall_open_port "$USER_CTRL_PORT" "tcp"
             for r in "${CUSTOM_RANGES[@]}"; do
                 IFS=':' read -r ps pe _pp <<< "$r"
+                echo -e "${GREEN}   Đang mở dải ${ps}-${pe} (TCP & UDP)...${NC}"
                 for (( p=ps; p<=pe; p++ )); do
-                    firewall_open_port "$p" "tcp"; firewall_open_port "$p" "udp"
+                    firewall_open_port "$p" "tcp" "quiet"; firewall_open_port "$p" "udp" "quiet"
                 done
             done
             firewall_reload_if_needed
@@ -905,8 +904,9 @@ EOF
             echo -e "${CYAN}>> Mở firewall...${NC}"
             for r in "${CUSTOM_RANGES[@]}"; do
                 IFS=':' read -r ps pe _pp <<< "$r"
+                echo -e "${GREEN}   Đang mở dải ${ps}-${pe} (TCP & UDP)...${NC}"
                 for (( p=ps; p<=pe; p++ )); do
-                    firewall_open_port "$p" "tcp"; firewall_open_port "$p" "udp"
+                    firewall_open_port "$p" "tcp" "quiet"; firewall_open_port "$p" "udp" "quiet"
                 done
             done
             firewall_reload_if_needed
@@ -1215,9 +1215,10 @@ EOF
         echo -e "${CYAN}>> Đóng firewall ports của user ${DEL_USER}...${NC}"
         DEL_PORTS=$(extract_ports_from_config "$FRPC_DEL_CONF")
         for dp in $DEL_PORTS; do
-            firewall_close_port "$dp" "tcp"
-            firewall_close_port "$dp" "udp"
+            firewall_close_port "$dp" "tcp" "quiet"
+            firewall_close_port "$dp" "udp" "quiet"
         done
+        echo -e "${YELLOW}   [Firewall] Đã đóng các port cũ của user ${DEL_USER}.${NC}"
         # Đóng control port nếu là dedicated user
         if [ -f "$FRPS_DEL_CONF" ] && grep -qF "bindPort" "$FRPS_DEL_CONF" 2>/dev/null; then
             DEL_CTRL_PORT=$(awk '/^bindPort/{print $NF}' "$FRPS_DEL_CONF" | head -1)
@@ -1280,9 +1281,10 @@ EOF
             [ -f "$conf" ] || continue
             CLEANUP_PORTS=$(extract_ports_from_config "$conf")
             for cp in $CLEANUP_PORTS; do
-                firewall_close_port "$cp" "tcp"
-                firewall_close_port "$cp" "udp"
+                firewall_close_port "$cp" "tcp" "quiet"
+                firewall_close_port "$cp" "udp" "quiet"
             done
+            echo -e "${YELLOW}   [Firewall] Đã đóng các port cũ của user $(basename "$conf" .toml | sed 's/frpc-user-//').${NC}"
         done
         # Đóng control ports từ frps configs
         for conf in /etc/frp/frps-user-*.toml /etc/frp/frps-main.toml; do
