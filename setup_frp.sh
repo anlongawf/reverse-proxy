@@ -601,7 +601,7 @@ EOF
 
         # frpc config
         NODE_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
-        WS_PORT; WS_PORT=$(calc_ws_port "$LOCAL_IP")
+        WS_PORT=$(calc_ws_port "$LOCAL_IP")
         cat > "$NODE_CONF" <<EOF
 # === frpc — Node: ${USERNAME} | IP Riêng ===
 serverAddr = "${STATIC_IP}"
@@ -684,7 +684,7 @@ EOF
         chmod 600 "$VPS_CONF"
 
         NODE_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
-        WS_PORT; WS_PORT=$(calc_ws_port "$LOCAL_IP")
+        WS_PORT=$(calc_ws_port "$LOCAL_IP")
         cat > "$NODE_CONF" <<EOF
 # === frpc — Node: ${USERNAME} | IP Chung ===
 serverAddr = "${SHARED_IP}"
@@ -782,7 +782,7 @@ EOF
         [ "${#CUSTOM_RANGES[@]}" -eq 0 ] && { echo -e "${RED}>> Cần ít nhất 1 dải port.${NC}"; exit 1; }
 
         SELECTED_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
-        WS_PORT; WS_PORT=$(calc_ws_port "$LOCAL_IP")
+        WS_PORT=$(calc_ws_port "$LOCAL_IP")
         install_frp_core
 
         cat > "$SELECTED_CONF" <<EOF
@@ -861,7 +861,7 @@ EOF
     if frp_ver_gte_052 "$FRP_MAJOR" "$FRP_MINOR"; then
         echo -e "${CYAN}   frpc reload -c ${SELECTED_CONF}${NC}"
     else
-        WS; WS=$(grep -A2 "webServer" "$SELECTED_CONF" | grep "port" | grep -oE '[0-9]+' | head -1 || true)
+        WS=$(grep -A2 "webServer" "$SELECTED_CONF" | grep "port" | grep -oE '[0-9]+' | head -1 || true)
         echo -e "${CYAN}   frpc reload --server_addr 127.0.0.1 --server_port ${WS:-40000}${NC}"
     fi
     ;;
@@ -1042,7 +1042,7 @@ EOF
     [[ ! "$uc" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
 
     install_frp_core "force"
-    NEW_VER; NEW_VER=$(/usr/local/bin/frpc --version 2>/dev/null || echo "unknown")
+    NEW_VER=$(/usr/local/bin/frpc --version 2>/dev/null || echo "unknown")
     echo -e "${GREEN}${BOLD}>> Xong! Version: ${NEW_VER}${NC}"
     echo -e "${YELLOW}>> Nên restart tất cả services (option 6 → 0).${NC}"
     log_action "UPDATE_FRP: ${OLD_VER:-none} -> ${NEW_VER}"
