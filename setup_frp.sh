@@ -539,7 +539,7 @@ EOF
         validate_ip "$STATIC_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
         [ "$STATIC_IP" == "$BIND_IP" ] && { echo -e "${RED}>> Trùng IP VPS!${NC}"; exit 1; }
 
-        existing_ip
+        # FIX: bỏ dòng "existing_ip" thừa, khai báo trực tiếp
         existing_ip=$(grep -rlF "bindAddr = \"${STATIC_IP}\"" /etc/frp/frps-user-*.toml 2>/dev/null | head -1 || true)
         [ -n "$existing_ip" ] && { echo -e "${RED}>> IP đã dùng bởi: $(basename "$existing_ip" .toml)${NC}"; exit 1; }
 
@@ -814,8 +814,9 @@ EOF
         echo -e "${CYAN}Chọn user:${NC}"
         for i in "${!FRPC_CONFS[@]}"; do
             u="${FRPC_CONFS[$i]##*/frpc-user-}"; u="${u%.toml}"
-            st; st=$(systemctl is-active "frpc-user-${u}.service" 2>/dev/null || echo "chưa cài")
-            echo -e "  ${YELLOW}$((i+1)).${NC} ${u} [${st}]"
+            # FIX: bỏ "st;" thừa, khai báo biến trực tiếp
+            local_st=$(systemctl is-active "frpc-user-${u}.service" 2>/dev/null || echo "chưa cài")
+            echo -e "  ${YELLOW}$((i+1)).${NC} ${u} [${local_st}]"
         done
         read -p "Chọn số: " fidx || { echo; exit 1; }
         validate_index "$fidx" "${#FRPC_CONFS[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
@@ -892,7 +893,7 @@ EOF
 
     echo -e "${CYAN}Danh sách service:${NC}"
     for i in "${!SVC_LIST[@]}"; do
-        st; st=$(systemctl is-active "${SVC_LIST[$i]}" 2>/dev/null || echo "unknown")
+        st=$(systemctl is-active "${SVC_LIST[$i]}" 2>/dev/null || echo "unknown")
         sc="$GREEN"; [ "$st" != "active" ] && sc="$RED"
         echo -e "  ${YELLOW}$((i+1)).${NC} ${SVC_LIST[$i]} — ${sc}${st}${NC}"
     done
@@ -954,7 +955,7 @@ EOF
         done
         # Đóng control port nếu dedicated
         if [ -f "$FRPS_DEL" ]; then
-            dcp; dcp=$(awk '/^bindPort/{print $NF}' "$FRPS_DEL" 2>/dev/null | head -1)
+            dcp=$(awk '/^bindPort/{print $NF}' "$FRPS_DEL" 2>/dev/null | head -1)
             [ -n "${dcp:-}" ] && firewall_close_port "$dcp" "tcp"
         fi
         firewall_reload_if_needed
@@ -1003,15 +1004,16 @@ EOF
         echo -e "${CYAN}>> Đóng tất cả ports FRP...${NC}"
         for conf in /etc/frp/frpc-user-*.toml; do
             [ -f "$conf" ] || continue
-            for cp in $(extract_ports_from_config "$conf"); do
-                firewall_close_port "$cp" "tcp" "quiet"
-                firewall_close_port "$cp" "udp" "quiet"
+            for cp_val in $(extract_ports_from_config "$conf"); do
+                firewall_close_port "$cp_val" "tcp" "quiet"
+                firewall_close_port "$cp_val" "udp" "quiet"
             done
         done
+        # FIX: đổi tên biến từ "cp" (trùng lệnh cp) sang "bind_cp"
         for conf in /etc/frp/frps-user-*.toml /etc/frp/frps-main.toml; do
             [ -f "$conf" ] || continue
-            cp; cp=$(awk '/^bindPort/{print $NF}' "$conf" 2>/dev/null | head -1)
-            [ -n "${cp:-}" ] && firewall_close_port "$cp" "tcp"
+            bind_cp=$(awk '/^bindPort/{print $NF}' "$conf" 2>/dev/null | head -1)
+            [ -n "${bind_cp:-}" ] && firewall_close_port "$bind_cp" "tcp"
         done
         firewall_reload_if_needed
     fi
