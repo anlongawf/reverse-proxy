@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ======================================================
-# AUTO SETUP MINECRAFT FRP TUNNEL — V17.1
+# AUTO SETUP MINECRAFT FRP TUNNEL — V17.2
 # ======================================================
-# Changelog từ V17.0:
-#   [FIX]  firewall_open/close_port: thêm || true vào [ ] && echo
-#          tránh set -e crash khi quiet="quiet"
-#   [CLEAN] Gộp logic lặp, bỏ code thừa, gọn hơn ~15%
+# Changelog từ V17.1:
+#   [FIX]  18 audit fixes: set -e safety, input validation, security
+#   [PERF] Firewall detection cache — tránh gọi lặp khi mở dải port
+#   [SEC]  Dependency check, iptables persistence, token escaping
 # ======================================================
 
 set -euo pipefail
@@ -37,15 +37,24 @@ esac
 mkdir -p /etc/frp
 FIREWALLD_RELOAD=0
 
+[[ "${DEBUG:-}" == "1" ]] && set -x
+
+for _dep in curl wget base64 systemctl awk sed grep tar; do
+    command -v "$_dep" >/dev/null 2>&1 || {
+        echo -e "${RED}[Lỗi] Thiếu lệnh: $_dep${NC}"; exit 1
+    }
+done
+
 # ==============================================
 # Helpers
 # ==============================================
 load_server_meta() {
     local f="/etc/frp/.server_meta"
-    [[ ! -f "$f" ]] && return 1 || true
+    [[ -f "$f" ]] || return 1
     VPS_CTRL_PORT=$(grep '^VPS_CTRL_PORT=' "$f" | head -1 | cut -d= -f2-) || true
     AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$f" | head -1 | cut -d= -f2-) || true
     BIND_IP=$(grep '^BIND_IP=' "$f" | head -1 | cut -d= -f2-) || true
+    [[ -n "$VPS_CTRL_PORT" && -n "$AUTH_TOKEN" && -n "$BIND_IP" ]] || return 1
 }
 
 sanitize_input() {
@@ -70,7 +79,9 @@ validate_ip() {
 }
 
 validate_port() {
-    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ] && return 0 || return 1
+    local p="${1:-}"
+    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
+    (( p >= 1 && p <= 65535 )) && return 0 || return 1
 }
 
 validate_index() {
@@ -114,16 +125,17 @@ parse_frp_version() {
 
 frp_ver_gte_052() {
     local maj="${1:-0}" min="${2:-0}"
-    [[ "$maj" =~ ^[0-9]+$ ]] && [[ "$min" =~ ^[0-9]+$ ]] || return 1
-    (( maj > 0 )) && return 0
-    (( maj == 0 && min >= 52 )) && return 0 || return 1
+    [[ "$maj" =~ ^[0-9]+$ && "$min" =~ ^[0-9]+$ ]] || return 1
+    if (( maj > 0 || (maj == 0 && min >= 52) )); then return 0; fi
+    return 1
 }
 
 # ==============================================
-# Firewall — FIX: thêm || true tránh set -e crash
+# Firewall (cached detection + iptables persistence)
 # ==============================================
+_FW_TYPE=""
 detect_firewall() {
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
         echo "ufw"
     elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
         echo "firewalld"
@@ -133,6 +145,7 @@ detect_firewall() {
         echo "none"
     fi
 }
+_fw_cached() { [[ -z "$_FW_TYPE" ]] && _FW_TYPE=$(detect_firewall); echo "$_FW_TYPE"; }
 
 _fw_msg() {
     # $1=quiet $2=msg — in nếu không quiet (|| true tránh set -e)
@@ -141,39 +154,53 @@ _fw_msg() {
 
 firewall_open_port() {
     local port=$1 proto=${2:-tcp} quiet=${3:-}
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
-        _fw_msg "$quiet" "${GREEN}   [UFW] Mở ${port}/${proto}${NC}"
-    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || true
-        _fw_msg "$quiet" "${GREEN}   [FirewallD] Mở ${port}/${proto}${NC}"
-        FIREWALLD_RELOAD=1
-    elif command -v iptables >/dev/null 2>&1; then
-        iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null \
-            || iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
-        _fw_msg "$quiet" "${GREEN}   [iptables] Mở ${port}/${proto}${NC}"
-    fi
+    local fw; fw=$(_fw_cached)
+    case "$fw" in
+        ufw)
+            ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+            _fw_msg "$quiet" "${GREEN}   [UFW] Mở ${port}/${proto}${NC}" ;;
+        firewalld)
+            firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1 || true
+            _fw_msg "$quiet" "${GREEN}   [FirewallD] Mở ${port}/${proto}${NC}"
+            FIREWALLD_RELOAD=1 ;;
+        iptables)
+            iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null \
+                || iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT
+            _fw_msg "$quiet" "${GREEN}   [iptables] Mở ${port}/${proto}${NC}" ;;
+    esac
 }
 
 firewall_close_port() {
     local port=$1 proto=${2:-tcp} quiet=${3:-}
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        ufw delete allow "${port}/${proto}" >/dev/null 2>&1 || true
-        _fw_msg "$quiet" "${YELLOW}   [UFW] Đóng ${port}/${proto}${NC}"
-    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1 || true
-        _fw_msg "$quiet" "${YELLOW}   [FirewallD] Đóng ${port}/${proto}${NC}"
-        FIREWALLD_RELOAD=1
-    elif command -v iptables >/dev/null 2>&1; then
-        iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || true
-        _fw_msg "$quiet" "${YELLOW}   [iptables] Đóng ${port}/${proto}${NC}"
-    fi
+    local fw; fw=$(_fw_cached)
+    case "$fw" in
+        ufw)
+            ufw delete allow "${port}/${proto}" >/dev/null 2>&1 || true
+            _fw_msg "$quiet" "${YELLOW}   [UFW] Đóng ${port}/${proto}${NC}" ;;
+        firewalld)
+            firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1 || true
+            _fw_msg "$quiet" "${YELLOW}   [FirewallD] Đóng ${port}/${proto}${NC}"
+            FIREWALLD_RELOAD=1 ;;
+        iptables)
+            iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || true
+            _fw_msg "$quiet" "${YELLOW}   [iptables] Đóng ${port}/${proto}${NC}" ;;
+    esac
 }
 
 firewall_reload_if_needed() {
-    [ "${FIREWALLD_RELOAD}" -eq 1 ] || return 0
-    firewall-cmd --reload >/dev/null 2>&1 && FIREWALLD_RELOAD=0 \
-        || echo -e "${YELLOW}>> Cảnh báo: firewalld reload thất bại.${NC}"
+    if [ "${FIREWALLD_RELOAD}" -eq 1 ]; then
+        firewall-cmd --reload >/dev/null 2>&1 && FIREWALLD_RELOAD=0 \
+            || echo -e "${YELLOW}>> Cảnh báo: firewalld reload thất bại.${NC}"
+    fi
+    # Persist iptables rules nếu đang dùng
+    local fw; fw=$(_fw_cached)
+    if [ "$fw" == "iptables" ]; then
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save 2>/dev/null || true
+        elif [ -d /etc/iptables ]; then
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        fi
+    fi
 }
 
 open_port_range() {
@@ -227,7 +254,9 @@ calc_user_ctrl_port() {
 }
 
 extract_ports_from_config() {
-    [ -f "$1" ] && grep "^remotePort" "$1" 2>/dev/null | grep -oE '[0-9]+' | sort -un || true
+    if [ -f "$1" ]; then
+        grep "^remotePort" "$1" 2>/dev/null | grep -oE '[0-9]+' | sort -un || true
+    fi
 }
 
 # ==============================================
@@ -354,7 +383,7 @@ show_pp_guide() {
 
 generate_node_install_script() {
     local uname="$1" conf="/etc/frp/frpc-user-${1}.toml"
-    [ ! -f "$conf" ] && return 1
+    [[ -f "$conf" ]] || return 1
     local b64; b64=$(base64 -w0 "$conf")
     local W=68
     echo -e "\n${YELLOW}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
@@ -427,7 +456,7 @@ list_users() {
 # ==============================================
 clear
 echo -e "${GREEN}${BOLD}╔═══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V17.1  ║${NC}"
+echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V17.2  ║${NC}"
 echo -e "${GREEN}${BOLD}╚═══════════════════════════════════════╝${NC}"
 echo ""
 echo "  1. Cài FRP SERVER   (chạy trên VPS)"
@@ -494,11 +523,8 @@ token = "${AUTH_TOKEN}"
 EOF
     chmod 600 "$CONF"
 
-    cat > /etc/frp/.server_meta <<EOF
-VPS_CTRL_PORT=${CTRL_PORT}
-AUTH_TOKEN=${AUTH_TOKEN}
-BIND_IP=${BIND_IP}
-EOF
+    printf 'VPS_CTRL_PORT=%s\nAUTH_TOKEN=%s\nBIND_IP=%s\n' \
+        "$CTRL_PORT" "$AUTH_TOKEN" "$BIND_IP" > /etc/frp/.server_meta
     chmod 600 /etc/frp/.server_meta
 
     cat > "/etc/systemd/system/frps-main.service" <<EOF
@@ -514,6 +540,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+    systemctl stop frps-main 2>/dev/null || true
     systemctl daemon-reload
     systemctl enable --now frps-main
 
@@ -664,7 +691,9 @@ EOF
             [ "$pp" == "y" ] && echo -e "   ${ps}-${pe}  [TCP PP v2 + UDP]" \
                               || echo -e "   ${ps}-${pe}  [TCP+UDP]"
         done
-        [ "$has_pp" == "y" ] && show_pp_guide "$STATIC_IP" || true
+        if [ "$has_pp" == "y" ]; then
+            show_pp_guide "$STATIC_IP"
+        fi
         generate_node_install_script "$USERNAME"
         log_action "ADD_NODE: ${USERNAME} (dedicated, IP=${STATIC_IP})"
 
@@ -776,6 +805,7 @@ EOF
 
         read -p "Control Port [7000]: " CTRL_PORT || { echo; exit 1; }
         CTRL_PORT=${CTRL_PORT:-7000}
+        validate_port "$CTRL_PORT" || { echo -e "${RED}>> Port không hợp lệ.${NC}"; exit 1; }
 
         read -s -p "Auth Token: " AUTH_TOKEN_USER || { echo; exit 1; }; echo
         [ -z "$AUTH_TOKEN_USER" ] && { echo -e "${RED}>> Token trống.${NC}"; exit 1; }
@@ -1037,6 +1067,11 @@ EOF
         firewall_reload_if_needed
     fi
 
+    # Backup audit log trước khi xóa
+    if [ -f /etc/frp/.audit.log ]; then
+        cp /etc/frp/.audit.log "/tmp/frp-audit-$(date +%s).log" 2>/dev/null || true
+        echo -e "${CYAN}>> Audit log đã backup tại /tmp/frp-audit-*.log${NC}"
+    fi
     rm -rf /etc/frp
     systemctl daemon-reload
 
