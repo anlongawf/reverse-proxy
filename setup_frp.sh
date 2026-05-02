@@ -42,10 +42,21 @@ FIREWALLD_RELOAD=0
 # ==============================================
 load_server_meta() {
     local f="/etc/frp/.server_meta"
-    [[ ! -f "$f" ]] && return 1
-    VPS_CTRL_PORT=$(grep '^VPS_CTRL_PORT=' "$f" | head -1 | cut -d= -f2-)
-    AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$f" | head -1 | cut -d= -f2-)
-    BIND_IP=$(grep '^BIND_IP=' "$f" | head -1 | cut -d= -f2-)
+    [[ ! -f "$f" ]] && return 1 || true
+    VPS_CTRL_PORT=$(grep '^VPS_CTRL_PORT=' "$f" | head -1 | cut -d= -f2-) || true
+    AUTH_TOKEN=$(grep '^AUTH_TOKEN=' "$f" | head -1 | cut -d= -f2-) || true
+    BIND_IP=$(grep '^BIND_IP=' "$f" | head -1 | cut -d= -f2-) || true
+}
+
+sanitize_input() {
+    # Xóa escape sequences ANSI, ký tự điều khiển, và khoảng trắng thừa
+    # (phát sinh khi user bấm phím mũi tên, Home, End, Delete... trong read)
+    local raw="$1"
+    # Strip ANSI/VT escape sequences: ESC[ ... hoặc ESC O ...
+    raw=$(printf '%s' "$raw" | sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\x1b[O][A-Za-z]//g; s/\x1b.//g')
+    # Strip ký tự điều khiển còn lại (ASCII < 32 trừ tab), trim spaces
+    raw=$(printf '%s' "$raw" | tr -d '\000-\010\013-\037\177' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    printf '%s' "$raw"
 }
 
 validate_ip() {
@@ -193,6 +204,10 @@ port_used_on_shared() {
 calc_ws_port() {
     local ip="$1"; local o2 o3 o4
     IFS='.' read -r _ o2 o3 o4 <<< "$ip"
+    # Đảm bảo octets là số nguyên thuần (tránh crash nếu IP bị nhiễm ký tự lạ)
+    o2=$(printf '%s' "$o2" | grep -oE '^[0-9]+' || echo 0)
+    o3=$(printf '%s' "$o3" | grep -oE '^[0-9]+' || echo 0)
+    o4=$(printf '%s' "$o4" | grep -oE '^[0-9]+' || echo 0)
     local candidate=$(( 40000 + (o2 * 65536 + o3 * 256 + o4) % 15000 )) attempts=0
     while grep -rqF "port = ${candidate}" /etc/frp/ 2>/dev/null; do
         (( candidate++ )); (( candidate > 55000 )) && candidate=40000
@@ -244,7 +259,7 @@ get_port_ranges() {
         if [ "$p_e" -lt "$p_s" ]; then
             echo -e "${RED}  >> Port kết thúc phải >= bắt đầu!${NC}"; continue
         fi
-        (( p_s < 1024 )) && echo -e "${YELLOW}  >> Cảnh báo: Port < 1024 cần root.${NC}"
+        (( p_s < 1024 )) && echo -e "${YELLOW}  >> Cảnh báo: Port < 1024 cần root.${NC}" || true
 
         # Kiểm tra overlap trong session
         local overlap=0
@@ -445,6 +460,7 @@ case "$choice" in
     read -p "Chọn IP [0=Tự gõ]: " ip_idx || { echo; exit 1; }
     if [ "$ip_idx" == "0" ]; then
         read -p "Nhập IP: " BIND_IP || { echo; exit 1; }
+        BIND_IP=$(sanitize_input "$BIND_IP")
     else
         validate_index "$ip_idx" "${#IP_LIST[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
         BIND_IP="${IP_LIST[$((ip_idx-1))]}"
@@ -525,7 +541,7 @@ EOF
     [ -f "/etc/frp/frps-user-${USERNAME}.toml" ] && { echo -e "${RED}>> Node '${USERNAME}' đã tồn tại!${NC}"; exit 1; }
 
     read -p "IP server game [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
-    LOCAL_IP="${LOCAL_IP:-127.0.0.1}"
+    LOCAL_IP=$(sanitize_input "${LOCAL_IP:-127.0.0.1}")
     validate_ip "$LOCAL_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
 
     echo -e "\n${CYAN}Node có IP public riêng không?${NC}"
@@ -536,6 +552,7 @@ EOF
     if [[ "${use_dedicated:-}" =~ ^[Yy]$ ]]; then
         # ===== DEDICATED IP =====
         read -p "IP public riêng của node: " STATIC_IP || { echo; exit 1; }
+        STATIC_IP=$(sanitize_input "$STATIC_IP")
         validate_ip "$STATIC_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
         [ "$STATIC_IP" == "$BIND_IP" ] && { echo -e "${RED}>> Trùng IP VPS!${NC}"; exit 1; }
 
@@ -647,7 +664,7 @@ EOF
             [ "$pp" == "y" ] && echo -e "   ${ps}-${pe}  [TCP PP v2 + UDP]" \
                               || echo -e "   ${ps}-${pe}  [TCP+UDP]"
         done
-        [ "$has_pp" == "y" ] && show_pp_guide "$STATIC_IP"
+        [ "$has_pp" == "y" ] && show_pp_guide "$STATIC_IP" || true
         generate_node_install_script "$USERNAME"
         log_action "ADD_NODE: ${USERNAME} (dedicated, IP=${STATIC_IP})"
 
@@ -754,6 +771,7 @@ EOF
         [ -z "$USERNAME" ] && { echo -e "${RED}>> Tên trống.${NC}"; exit 1; }
 
         read -p "IP VPS: " VPS_IP || { echo; exit 1; }
+        VPS_IP=$(sanitize_input "$VPS_IP")
         validate_ip "$VPS_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
 
         read -p "Control Port [7000]: " CTRL_PORT || { echo; exit 1; }
@@ -763,7 +781,8 @@ EOF
         [ -z "$AUTH_TOKEN_USER" ] && { echo -e "${RED}>> Token trống.${NC}"; exit 1; }
 
         read -p "IP server game [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
-        LOCAL_IP=${LOCAL_IP:-127.0.0.1}
+        LOCAL_IP=$(sanitize_input "${LOCAL_IP:-127.0.0.1}")
+        validate_ip "$LOCAL_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
 
         echo -e "\n${CYAN}PP v2: Chỉ bật nếu BungeeCord/Velocity + IP riêng.${NC}"
         read -p "Bật PP v2? (y/N): " USE_PP || { echo; exit 1; }
@@ -862,7 +881,7 @@ EOF
     if frp_ver_gte_052 "$FRP_MAJOR" "$FRP_MINOR"; then
         echo -e "${CYAN}   frpc reload -c ${SELECTED_CONF}${NC}"
     else
-        WS=$(grep -A2 "webServer" "$SELECTED_CONF" | grep "port" | grep -oE '[0-9]+' | head -1 || true)
+        WS=$(grep -A2 "webServer" "$SELECTED_CONF" 2>/dev/null | grep "port" | grep -oE '[0-9]+' | head -1) || true
         echo -e "${CYAN}   frpc reload --server_addr 127.0.0.1 --server_port ${WS:-40000}${NC}"
     fi
     ;;
@@ -940,8 +959,8 @@ EOF
     validate_index "$didx" "${#USER_LIST[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
     DEL_USER="${USER_LIST[$((didx-1))]}"
 
-    read -p "$(echo -e "${RED}>> Xác nhận xóa '${DEL_USER}'? (y/N): ${NC}")" cd || { echo; exit 1; }
-    [[ ! "$cd" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
+    read -p "$(echo -e "${RED}>> Xác nhận xóa '${DEL_USER}'? (y/N): ${NC}")" del_confirm || { echo; exit 1; }
+    [[ ! "$del_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
 
     FRPC_DEL="/etc/frp/frpc-user-${DEL_USER}.toml"
     FRPS_DEL="/etc/frp/frps-user-${DEL_USER}.toml"
