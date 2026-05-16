@@ -90,6 +90,80 @@ validate_index() {
 }
 
 # ==============================================
+# Loopback IP Management
+# ==============================================
+detect_persist_method() {
+    if systemctl is-active --quiet systemd-networkd 2>/dev/null; then
+        echo "systemd-networkd"
+    elif [ -f /etc/network/interfaces ]; then
+        echo "interfaces"
+    elif [ -f /etc/rc.local ]; then
+        echo "rc.local"
+    else
+        echo "none"
+    fi
+}
+
+ensure_loopback_ip() {
+    local ip="$1"
+    [[ "$ip" == 127.* ]] || return 0
+    [ "$ip" == "127.0.0.1" ] && return 0
+    if ip addr show lo 2>/dev/null | grep -qF " ${ip}/"; then
+        echo -e "${GREEN}>> Loopback ${ip} đã có sẵn.${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}>> IP ${ip} chưa tồn tại trên máy này.${NC}"
+    read -p "Tự động tạo loopback alias ${ip}? (y/N): " _create_lo || { echo; return 0; }
+    [[ ! "${_create_lo:-}" =~ ^[Yy]$ ]] && return 0
+    if ! ip addr add "${ip}/8" dev lo 2>/dev/null; then
+        echo -e "${RED}>> Tạo loopback thất bại!${NC}"; return 1
+    fi
+    echo -e "${GREEN}>> Loopback ${ip} tạo thành công (tạm thời).${NC}"
+    local method ip_dash
+    method=$(detect_persist_method)
+    ip_dash="${ip//./-}"
+    case "$method" in
+        systemd-networkd)
+            local netf="/etc/systemd/network/10-lo-alias-${ip_dash}.network"
+            printf '[Match]\nName=lo\n\n[Address]\nAddress=%s/8\n' "$ip" > "$netf"
+            systemctl restart systemd-networkd 2>/dev/null || true
+            echo -e "${GREEN}>> Persist: ${netf}${NC}" ;;
+        interfaces)
+            if ! grep -qF "$ip" /etc/network/interfaces 2>/dev/null; then
+                printf '\nup ip addr add %s/8 dev lo\ndown ip addr del %s/8 dev lo\n' \
+                    "$ip" "$ip" >> /etc/network/interfaces
+                echo -e "${GREEN}>> Persist: /etc/network/interfaces${NC}"
+            fi ;;
+        rc.local)
+            if ! grep -qF "$ip" /etc/rc.local 2>/dev/null; then
+                sed -i "s|^exit 0|ip addr add ${ip}/8 dev lo 2>/dev/null || true\nexit 0|" /etc/rc.local
+                echo -e "${GREEN}>> Persist: /etc/rc.local${NC}"
+            fi ;;
+        *)
+            echo -e "${YELLOW}>> Không detect được phương thức persist. IP sẽ mất sau reboot!${NC}" ;;
+    esac
+    log_action "CREATE_LOOPBACK: ${ip}"
+    return 0
+}
+
+remove_loopback_ip() {
+    local ip="$1"
+    [[ "$ip" == 127.* ]] || return 0
+    [ "$ip" == "127.0.0.1" ] && return 0
+    ip addr show lo 2>/dev/null | grep -qF " ${ip}/" || return 0
+    read -p "Xóa loopback alias ${ip} khỏi hệ thống? (y/N): " _rem_lo || { echo; return 0; }
+    [[ ! "${_rem_lo:-}" =~ ^[Yy]$ ]] && return 0
+    ip addr del "${ip}/8" dev lo 2>/dev/null || true
+    local ip_dash="${ip//./-}" ip_esc="${ip//./\\.}"
+    local netf="/etc/systemd/network/10-lo-alias-${ip_dash}.network"
+    [ -f "$netf" ] && { rm -f "$netf"; systemctl restart systemd-networkd 2>/dev/null || true; }
+    [ -f /etc/network/interfaces ] && sed -i "/ip addr.*${ip_esc}/d" /etc/network/interfaces 2>/dev/null || true
+    [ -f /etc/rc.local ] && sed -i "/ip addr.*${ip_esc}/d" /etc/rc.local 2>/dev/null || true
+    log_action "REMOVE_LOOPBACK: ${ip}"
+    echo -e "${GREEN}>> Đã xóa loopback ${ip}.${NC}"
+}
+
+# ==============================================
 # FRP binary
 # ==============================================
 install_frp_core() {
@@ -266,7 +340,7 @@ get_port_ranges() {
     local mode=$1; CUSTOM_RANGES=()
     echo -e "\n${CYAN}${BOLD}--- Cấu hình Dải Port ---${NC}"
     if [ "$mode" == "shared" ]; then
-        echo -e "  ${YELLOW}IP Chung: TCP+UDP, không PP. Script tự kiểm tra port trùng.${NC}"
+        echo -e "  ${YELLOW}IP Chung: TCP+UDP thuần. Script tự kiểm tra port trùng.${NC}"
         echo -e "  ${YELLOW}Ví dụ: 19000-19200, 25565-25565${NC}"
     else
         echo -e "  ${YELLOW}IP Riêng: chọn có bật PP v2 (BungeeCord/Velocity) hay không.${NC}"
@@ -367,17 +441,22 @@ EOF
 # Helpers hiển thị
 # ==============================================
 show_pp_guide() {
-    local ip=$1 W=62
+    local ip=$1 W=66
     echo -e "\n${CYAN}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "📋 HƯỚNG DẪN PP v2 — IP Riêng"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "📋 HƯỚNG DẪN BẬT PP v2 PHÍA SERVER GAME"
     printf "${CYAN}║  %-$((W-2))s║${NC}\n" "IP kết nối: ${ip}"
     printf "${CYAN}║  %-$((W-2))s║${NC}\n" ""
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "BungeeCord/Waterfall — config.yml:"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "▶ Paper (1.19+) — config/paper-global.yml:"
+    printf "${CYAN}║    %-$((W-4))s║${NC}\n" "proxies:"
+    printf "${CYAN}║      %-$((W-6))s║${NC}\n" "proxy-protocol: true"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" ""
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "▶ BungeeCord/Waterfall — config.yml:"
     printf "${CYAN}║    %-$((W-4))s║${NC}\n" "proxy_protocol: true   ip_forward: true"
     printf "${CYAN}║  %-$((W-2))s║${NC}\n" ""
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "Velocity — velocity.toml:"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "▶ Velocity — velocity.toml:"
     printf "${CYAN}║    %-$((W-4))s║${NC}\n" "haproxy-protocol = true"
-    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "❌ Quên config → Player KHÔNG vào được!"
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" ""
+    printf "${CYAN}║  %-$((W-2))s║${NC}\n" "❌ Quên config phía server → Player KHÔNG vào được!"
     echo -e "${CYAN}╚$(printf '═%.0s' $(seq 1 "$W"))╝${NC}"
 }
 
@@ -385,11 +464,19 @@ generate_node_install_script() {
     local uname="$1" conf="/etc/frp/frpc-user-${1}.toml"
     [[ -f "$conf" ]] || return 1
     local b64; b64=$(base64 -w0 "$conf")
+    # Trích xuất localIP để embed bước tạo loopback (chỉ 127.x.x.x)
+    local local_ip lo_cmd=""
+    local_ip=$(grep 'localIP' "$conf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    if [[ "${local_ip:-}" == 127.* ]] && [ "${local_ip}" != "127.0.0.1" ]; then
+        local ip_dash="${local_ip//./-}"
+        # Build loopback snippet (one-liner) để embed vào lệnh cài nhanh
+        lo_cmd=" && _LO='${local_ip}' && if ! ip addr show lo 2>/dev/null | grep -qF \" \${_LO}/\"; then ip addr add \${_LO}/8 dev lo 2>/dev/null || true && { if systemctl is-active --quiet systemd-networkd 2>/dev/null; then mkdir -p /etc/systemd/network && printf '[Match]\\nName=lo\\n\\n[Address]\\nAddress=%s/8\\n' \"\${_LO}\" > /etc/systemd/network/10-lo-alias-${ip_dash}.network && systemctl restart systemd-networkd 2>/dev/null || true; elif [ -f /etc/network/interfaces ] && ! grep -qF \"\${_LO}\" /etc/network/interfaces 2>/dev/null; then printf '\\nup ip addr add %s/8 dev lo\\ndown ip addr del %s/8 dev lo\\n' \"\${_LO}\" \"\${_LO}\" >> /etc/network/interfaces; elif [ -f /etc/rc.local ]; then sed -i \"s|^exit 0|ip addr add \${_LO}/8 dev lo 2>/dev/null || true\\nexit 0|\" /etc/rc.local; fi; } && echo -e \"\\e[32m[+] Loopback \${_LO} đã tạo\\e[0m\"; else echo -e \"\\e[33m[i] Loopback \${_LO} đã có sẵn\\e[0m\"; fi"
+    fi
     local W=68
     echo -e "\n${YELLOW}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
     printf "${YELLOW}║  %-$((W-2))s║${NC}\n" "🚀 LỆNH CÀI NHANH — CHẠY TRÊN NODE (quyền root)"
     echo -e "${YELLOW}╚$(printf '═%.0s' $(seq 1 "$W"))╝${NC}\n"
-    echo -e "${GREEN}mkdir -p /etc/frp && echo \"${b64}\" | base64 -d > \"/etc/frp/frpc-user-${uname}.toml\" && chmod 600 \"/etc/frp/frpc-user-${uname}.toml\" && echo -e \"\\n\\e[32m[+] Config OK\\e[0m\\n\\e[33m[!] Chạy script -> Option 4 -> Cách 1\\e[0m\"${NC}\n"
+    echo -e "${GREEN}mkdir -p /etc/frp && echo \"${b64}\" | base64 -d > \"/etc/frp/frpc-user-${uname}.toml\" && chmod 600 \"/etc/frp/frpc-user-${uname}.toml\"${lo_cmd} && echo -e \"\\n\\e[32m[+] Config OK\\e[0m\\n\\e[33m[!] Chạy script -> Option 4 -> Cách 1\\e[0m\"${NC}\n"
 }
 
 list_users() {
@@ -411,19 +498,19 @@ list_users() {
         frpc_status=$(systemctl is-active "frpc-user-${uname}.service" 2>/dev/null || echo "inactive")
         sc="$GREEN"; [ "$frpc_status" != "active" ] && sc="$RED"
 
-        echo -e "  ${BOLD}${uname}${NC} [${pkg}]"
+        echo -e "\n${BOLD}${uname}${NC} [${pkg}]"
 
         if systemctl list-units --all --no-legend 2>/dev/null | grep -qF "frps-user-${uname}.service"; then
             frps_status=$(systemctl is-active "frps-user-${uname}.service" 2>/dev/null || echo "inactive")
             local fsc="$GREEN"; [ "$frps_status" != "active" ] && fsc="$RED"
-            echo -e "    frps : ${fsc}${frps_status}${NC}"
+            echo -e "  frps : ${fsc}${frps_status}${NC}"
         fi
-        echo -e "    frpc : ${sc}${frpc_status}${NC}"
-        echo -e "    Meta : ${conf}"
+        echo -e "  frpc : ${sc}${frpc_status}${NC}"
+        echo -e "  Meta : ${conf}"
 
         local frpc_conf="/etc/frp/frpc-user-${uname}.toml"
         if [ -f "$frpc_conf" ]; then
-            echo -e "    Conf : ${frpc_conf}"
+            echo -e "  Conf : ${frpc_conf}"
             # Hiển thị port dạng dải gọn
             local ports range_str="" start="" prev=""
             ports=$(grep "^remotePort" "$frpc_conf" 2>/dev/null \
@@ -439,12 +526,12 @@ list_users() {
             if [ -n "$start" ]; then
                 [ "$start" == "$prev" ] && range_str+="${start}" || range_str+="${start}-${prev}"
             fi
-            [ -n "$range_str" ] && echo -e "    Port : ${CYAN}${range_str}${NC}"
+            [ -n "$range_str" ] && echo -e "  Port : ${CYAN}${range_str}${NC}"
         else
-            echo -e "    ${YELLOW}(Chưa cài client — chạy option 4 trên Node)${NC}"
+            echo -e "  ${YELLOW}(Chưa cài client — chạy option 4 trên Node)${NC}"
         fi
 
-        echo ""; found=1
+        found=1
     done < <(find /etc/frp -maxdepth 1 -name "frps-user-*.toml" 2>/dev/null | sort)
 
     [ "$found" -eq 0 ] && echo -e "  ${YELLOW}Chưa có user nào.${NC}"
@@ -513,6 +600,11 @@ case "$choice" in
     fi
 
     CONF="/etc/frp/frps-main.toml"
+    if [ -f "$CONF" ]; then
+        echo -e "${YELLOW}>> frps-main.toml đã tồn tại — ghi đè sẽ restart service!${NC}"
+        read -p "Tiếp tục ghi đè? (y/N): " ow || { echo; exit 1; }
+        [[ ! "$ow" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
+    fi
     cat > "$CONF" <<EOF
 bindAddr = "${BIND_IP}"
 bindPort = ${CTRL_PORT}
@@ -746,9 +838,11 @@ port = ${WS_PORT}
 EOF
         chmod 600 "$NODE_CONF"
 
+        has_pp="n"
         for r in "${CUSTOM_RANGES[@]}"; do
-            IFS=':' read -r ps pe _ <<< "$r"
-            write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$NODE_CONF" "n"
+            IFS=':' read -r ps pe pp <<< "$r"
+            write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$NODE_CONF" "$pp"
+            [ "$pp" == "y" ] && has_pp="y"
         done
 
         FW=$(detect_firewall)
@@ -766,11 +860,15 @@ EOF
         echo -e "${GREEN}   IP VPS   : ${SHARED_IP}${NC}"
         echo -e "${GREEN}   Local IP : ${LOCAL_IP}${NC}"
         echo -e "${GREEN}   Config   : ${NODE_CONF}${NC}"
-        echo -e "\n${CYAN}>> Dải port (TCP+UDP):${NC}"
+        echo -e "\n${CYAN}>> Dải port:${NC}"
         for r in "${CUSTOM_RANGES[@]}"; do
-            IFS=':' read -r ps pe _ <<< "$r"
-            echo -e "   ${ps}-${pe}"
+            IFS=':' read -r ps pe pp <<< "$r"
+            [ "$pp" == "y" ] && echo -e "   ${ps}-${pe}  [TCP PP v2 + UDP]" \
+                             || echo -e "   ${ps}-${pe}  [TCP+UDP thuần]"
         done
+        if [ "$has_pp" == "y" ]; then
+            show_pp_guide "$SHARED_IP"
+        fi
         generate_node_install_script "$USERNAME"
         log_action "ADD_NODE: ${USERNAME} (shared, IP=${SHARED_IP})"
     fi
@@ -792,6 +890,8 @@ EOF
     echo -e "  1. Dùng file config sẵn (deploy tự động / copy từ VPS)"
     echo -e "  2. Nhập cấu hình thủ công"
     read -p "Chọn cách [1/2]: " install_method || { echo; exit 1; }
+    install_method="${install_method:-1}"
+    [[ ! "$install_method" =~ ^[12]$ ]] && { echo -e "${RED}>> Chỉ nhập 1 hoặc 2.${NC}"; exit 1; }
 
     if [ "$install_method" == "2" ]; then
         echo -e "\n${CYAN}--- Nhập thủ công ---${NC}"
@@ -813,8 +913,13 @@ EOF
         read -p "IP server game [127.0.0.1]: " LOCAL_IP || { echo; exit 1; }
         LOCAL_IP=$(sanitize_input "${LOCAL_IP:-127.0.0.1}")
         validate_ip "$LOCAL_IP" || { echo -e "${RED}>> IP không hợp lệ.${NC}"; exit 1; }
+        ensure_loopback_ip "$LOCAL_IP" || true
 
-        echo -e "\n${CYAN}PP v2: Chỉ bật nếu BungeeCord/Velocity + IP riêng.${NC}"
+        echo -e "\n${CYAN}PP v2: Truyền real IP của player qua tunnel đến server game.${NC}"
+        echo -e "${CYAN}  Paper: config/paper-global.yml → proxies.proxy-protocol: true${NC}"
+        echo -e "${CYAN}  BungeeCord: config.yml → proxy_protocol: true + ip_forward: true${NC}"
+        echo -e "${CYAN}  Velocity: velocity.toml → haproxy-protocol = true${NC}"
+        echo -e "${RED}  ❌ KHÔNG bật nếu server game chưa config → player không vào được!${NC}"
         read -p "Bật PP v2? (y/N): " USE_PP || { echo; exit 1; }
         [[ "$USE_PP" =~ ^[Yy]$ ]] && use_pp="y" || use_pp="n"
 
@@ -831,6 +936,11 @@ EOF
         [ "${#CUSTOM_RANGES[@]}" -eq 0 ] && { echo -e "${RED}>> Cần ít nhất 1 dải port.${NC}"; exit 1; }
 
         SELECTED_CONF="/etc/frp/frpc-user-${USERNAME}.toml"
+        if [ -f "$SELECTED_CONF" ]; then
+            echo -e "${YELLOW}>> Config đã tồn tại: $SELECTED_CONF${NC}"
+            read -p "Ghi đè? (y/N): " ow || { echo; exit 1; }
+            [[ ! "$ow" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
+        fi
         WS_PORT=$(calc_ws_port "$LOCAL_IP")
         install_frp_core
 
@@ -872,6 +982,9 @@ EOF
         SELECTED_CONF="${FRPC_CONFS[$((fidx-1))]}"
         [ ! -f "$SELECTED_CONF" ] && { echo -e "${RED}>> File không tồn tại.${NC}"; exit 1; }
         install_frp_core
+        # Auto-detect loopback IP từ config và tạo nếu chưa có
+        _conf_lip=$(grep 'localIP' "$SELECTED_CONF" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        [ -n "${_conf_lip:-}" ] && ensure_loopback_ip "$_conf_lip" || true
     fi
 
     SEL_USER="${SELECTED_CONF##*/frpc-user-}"; SEL_USER="${SEL_USER%.toml}"
@@ -995,6 +1108,12 @@ EOF
     FRPC_DEL="/etc/frp/frpc-user-${DEL_USER}.toml"
     FRPS_DEL="/etc/frp/frps-user-${DEL_USER}.toml"
 
+    # Xóa loopback IP nếu có
+    if [ -f "$FRPC_DEL" ]; then
+        _del_lip=$(grep 'localIP' "$FRPC_DEL" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        [ -n "${_del_lip:-}" ] && remove_loopback_ip "$_del_lip" || true
+    fi
+
     FW=$(detect_firewall)
     if [ "$FW" != "none" ] && [ -f "$FRPC_DEL" ]; then
         echo -e "${CYAN}>> Đóng firewall ports...${NC}"
@@ -1013,9 +1132,9 @@ EOF
 
     for svc_type in frps frpc; do
         SVC="${svc_type}-user-${DEL_USER}.service"
-        if systemctl list-units --all --no-legend 2>/dev/null | grep -qF "$SVC"; then
-            systemctl stop "$SVC" 2>/dev/null || true
-            systemctl disable "$SVC" 2>/dev/null || true
+        systemctl stop "$SVC" 2>/dev/null || true
+        systemctl disable "$SVC" 2>/dev/null || true
+        if [ -f "/etc/systemd/system/${SVC}" ]; then
             rm -f "/etc/systemd/system/${SVC}"
             echo -e "${GREEN}>> Xóa service ${SVC}.${NC}"
         fi
@@ -1067,11 +1186,20 @@ EOF
         firewall_reload_if_needed
     fi
 
-    # Backup audit log trước khi xóa
+    # Backup audit log + ghi log TRƯỚC khi xóa
     if [ -f /etc/frp/.audit.log ]; then
         cp /etc/frp/.audit.log "/tmp/frp-audit-$(date +%s).log" 2>/dev/null || true
         echo -e "${CYAN}>> Audit log đã backup tại /tmp/frp-audit-*.log${NC}"
     fi
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] CLEAN_ALL" >> /etc/frp/.audit.log 2>/dev/null || true
+
+    # Xóa orphaned service files (có thể chưa load vào systemd)
+    for _sf in /etc/systemd/system/frp{s,c}-*.service; do
+        [ -f "$_sf" ] || continue
+        rm -f "$_sf"
+        echo -e "${YELLOW}>> Xóa file: ${_sf}${NC}"
+    done
+
     rm -rf /etc/frp
     systemctl daemon-reload
 
@@ -1080,7 +1208,6 @@ EOF
         && echo -e "${GREEN}>> Đã xóa binary.${NC}"
 
     echo -e "${RED}${BOLD}>> ĐÃ XÓA SẠCH!${NC}"
-    log_action "CLEAN_ALL"
     ;;
 
 # ==============================================
