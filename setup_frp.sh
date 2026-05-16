@@ -106,61 +106,60 @@ detect_persist_method() {
 
 ensure_loopback_ip() {
     local ip="$1"
-    [[ "$ip" == 127.* ]] || return 0
+    # Kiểm tra xem có phải IP Private không (127.*, 10.*, 172.16-31.*, 192.168.*)
+    local is_private=0
+    [[ "$ip" =~ ^127\. ]] && is_private=1
+    [[ "$ip" =~ ^10\. ]] && is_private=1
+    [[ "$ip" =~ ^192\.168\. ]] && is_private=1
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && is_private=1
+
+    [ "$is_private" -eq 0 ] && return 0
     [ "$ip" == "127.0.0.1" ] && return 0
-    if ip addr show lo 2>/dev/null | grep -qF " ${ip}/"; then
-        echo -e "${GREEN}>> Loopback ${ip} đã có sẵn.${NC}"
+
+    if ip addr show 2>/dev/null | grep -qF " ${ip}/"; then
         return 0
     fi
-    echo -e "${YELLOW}>> IP ${ip} chưa tồn tại trên máy này.${NC}"
-    read -p "Tự động tạo loopback alias ${ip}? (y/N): " _create_lo || { echo; return 0; }
+
+    echo -e "${YELLOW}>> IP ${ip} chưa tồn tại trên hệ thống.${NC}"
+    read -p "Bạn có muốn tự động tạo IP này trên loopback (lo) không? (y/N): " _create_lo || { echo; return 0; }
     [[ ! "${_create_lo:-}" =~ ^[Yy]$ ]] && return 0
-    if ! ip addr add "${ip}/8" dev lo 2>/dev/null; then
-        echo -e "${RED}>> Tạo loopback thất bại!${NC}"; return 1
+
+    # Dùng netmask /32 cho IP lẻ để tránh xung đột mạng LAN
+    if ! ip addr add "${ip}/32" dev lo 2>/dev/null; then
+        echo -e "${RED}>> Tạo IP thất bại! Có thể do IP trùng với dải mạng LAN thật.${NC}"; return 1
     fi
-    echo -e "${GREEN}>> Loopback ${ip} tạo thành công (tạm thời).${NC}"
+    echo -e "${GREEN}>> Đã tạo IP ${ip} trên loopback.${NC}"
+
     local method ip_dash
     method=$(detect_persist_method)
     ip_dash="${ip//./-}"
     case "$method" in
         systemd-networkd)
             local netf="/etc/systemd/network/10-lo-alias-${ip_dash}.network"
-            printf '[Match]\nName=lo\n\n[Address]\nAddress=%s/8\n' "$ip" > "$netf"
-            systemctl restart systemd-networkd 2>/dev/null || true
-            echo -e "${GREEN}>> Persist: ${netf}${NC}" ;;
+            printf '[Match]\nName=lo\n\n[Address]\nAddress=%s/32\n' "$ip" > "$netf"
+            systemctl restart systemd-networkd 2>/dev/null || true ;;
         interfaces)
-            if ! grep -qF "$ip" /etc/network/interfaces 2>/dev/null; then
-                printf '\nup ip addr add %s/8 dev lo\ndown ip addr del %s/8 dev lo\n' \
-                    "$ip" "$ip" >> /etc/network/interfaces
-                echo -e "${GREEN}>> Persist: /etc/network/interfaces${NC}"
-            fi ;;
+            printf '\nup ip addr add %s/32 dev lo\ndown ip addr del %s/32 dev lo\n' "$ip" "$ip" >> /etc/network/interfaces ;;
         rc.local)
-            if ! grep -qF "$ip" /etc/rc.local 2>/dev/null; then
-                sed -i "s|^exit 0|ip addr add ${ip}/8 dev lo 2>/dev/null || true\nexit 0|" /etc/rc.local
-                echo -e "${GREEN}>> Persist: /etc/rc.local${NC}"
-            fi ;;
-        *)
-            echo -e "${YELLOW}>> Không detect được phương thức persist. IP sẽ mất sau reboot!${NC}" ;;
+            sed -i "s|^exit 0|ip addr add ${ip}/32 dev lo 2>/dev/null || true\nexit 0|" /etc/rc.local ;;
     esac
-    log_action "CREATE_LOOPBACK: ${ip}"
+    log_action "CREATE_IP_ALIAS: ${ip}"
     return 0
 }
 
 remove_loopback_ip() {
     local ip="$1"
-    [[ "$ip" == 127.* ]] || return 0
     [ "$ip" == "127.0.0.1" ] && return 0
     ip addr show lo 2>/dev/null | grep -qF " ${ip}/" || return 0
-    read -p "Xóa loopback alias ${ip} khỏi hệ thống? (y/N): " _rem_lo || { echo; return 0; }
+    read -p "Gỡ bỏ IP ảo ${ip} khỏi hệ thống? (y/N): " _rem_lo || { echo; return 0; }
     [[ ! "${_rem_lo:-}" =~ ^[Yy]$ ]] && return 0
-    ip addr del "${ip}/8" dev lo 2>/dev/null || true
+    ip addr del "${ip}/32" dev lo 2>/dev/null || true
     local ip_dash="${ip//./-}" ip_esc="${ip//./\\.}"
     local netf="/etc/systemd/network/10-lo-alias-${ip_dash}.network"
     [ -f "$netf" ] && { rm -f "$netf"; systemctl restart systemd-networkd 2>/dev/null || true; }
     [ -f /etc/network/interfaces ] && sed -i "/ip addr.*${ip_esc}/d" /etc/network/interfaces 2>/dev/null || true
     [ -f /etc/rc.local ] && sed -i "/ip addr.*${ip_esc}/d" /etc/rc.local 2>/dev/null || true
-    log_action "REMOVE_LOOPBACK: ${ip}"
-    echo -e "${GREEN}>> Đã xóa loopback ${ip}.${NC}"
+    log_action "REMOVE_IP_ALIAS: ${ip}"
 }
 
 # ==============================================
@@ -467,10 +466,18 @@ generate_node_install_script() {
     # Trích xuất localIP để embed bước tạo loopback (chỉ 127.x.x.x)
     local local_ip lo_cmd=""
     local_ip=$(grep 'localIP' "$conf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-    if [[ "${local_ip:-}" == 127.* ]] && [ "${local_ip}" != "127.0.0.1" ]; then
-        local ip_dash="${local_ip//./-}"
-        # Build loopback snippet (one-liner) để embed vào lệnh cài nhanh
-        lo_cmd=" && _LO='${local_ip}' && if ! ip addr show lo 2>/dev/null | grep -qF \" \${_LO}/\"; then ip addr add \${_LO}/8 dev lo 2>/dev/null || true && { if systemctl is-active --quiet systemd-networkd 2>/dev/null; then mkdir -p /etc/systemd/network && printf '[Match]\\nName=lo\\n\\n[Address]\\nAddress=%s/8\\n' \"\${_LO}\" > /etc/systemd/network/10-lo-alias-${ip_dash}.network && systemctl restart systemd-networkd 2>/dev/null || true; elif [ -f /etc/network/interfaces ] && ! grep -qF \"\${_LO}\" /etc/network/interfaces 2>/dev/null; then printf '\\nup ip addr add %s/8 dev lo\\ndown ip addr del %s/8 dev lo\\n' \"\${_LO}\" \"\${_LO}\" >> /etc/network/interfaces; elif [ -f /etc/rc.local ]; then sed -i \"s|^exit 0|ip addr add \${_LO}/8 dev lo 2>/dev/null || true\\nexit 0|\" /etc/rc.local; fi; } && echo -e \"\\e[32m[+] Loopback \${_LO} đã tạo\\e[0m\"; else echo -e \"\\e[33m[i] Loopback \${_LO} đã có sẵn\\e[0m\"; fi"
+    if [ -n "${local_ip:-}" ] && [ "${local_ip}" != "127.0.0.1" ]; then
+        # Check nếu là IP riêng
+        local is_p=0
+        [[ "$local_ip" =~ ^127\. ]] && is_p=1
+        [[ "$local_ip" =~ ^10\. ]] && is_p=1
+        [[ "$local_ip" =~ ^192\.168\. ]] && is_p=1
+        [[ "$local_ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && is_p=1
+
+        if [ "$is_p" -eq 1 ]; then
+            local ip_dash="${local_ip//./-}"
+            lo_cmd=" && _LO='${local_ip}' && if ! ip addr show 2>/dev/null | grep -qF \" \${_LO}/\"; then ip addr add \${_LO}/32 dev lo 2>/dev/null || true && { if systemctl is-active --quiet systemd-networkd 2>/dev/null; then mkdir -p /etc/systemd/network && printf '[Match]\\nName=lo\\n\\n[Address]\\nAddress=%s/32\\n' \"\${_LO}\" > /etc/systemd/network/10-lo-alias-${ip_dash}.network && systemctl restart systemd-networkd 2>/dev/null || true; elif [ -f /etc/network/interfaces ] && ! grep -qF \"\${_LO}\" /etc/network/interfaces 2>/dev/null; then printf '\\nup ip addr add %s/32 dev lo\\ndown ip addr del %s/32 dev lo\\n' \"\${_LO}\" \"\${_LO}\" >> /etc/network/interfaces; elif [ -f /etc/rc.local ]; then sed -i \"s|^exit 0|ip addr add \${_LO}/32 dev lo 2>/dev/null || true\\nexit 0|\" /etc/rc.local; fi; } && echo -e \"\\e[32m[+] IP ảo \${_LO} đã tạo\\e[0m\"; fi"
+        fi
     fi
     local W=68
     echo -e "\n${YELLOW}╔$(printf '═%.0s' $(seq 1 "$W"))╗${NC}"
