@@ -932,13 +932,23 @@ EOF
 
         CUSTOM_RANGES=()
         while true; do
-            read -p "Thêm dải port? (y/N): " am || { echo; break; }
-            [[ ! "$am" =~ ^[Yy]$ ]] && break
-            read -p "  Bắt đầu: " p_s || { echo; break; }
-            read -p "  Kết thúc: " p_e || { echo; break; }
-            validate_port "$p_s" && validate_port "$p_e" || { echo -e "${RED}  >> Port không hợp lệ!${NC}"; continue; }
+            if [ "${#CUSTOM_RANGES[@]}" -eq 0 ]; then
+                read -p "Nhập dải port (y để thêm): " am || { echo; break; }
+                if [[ ! "$am" =~ ^[Yy]$ ]]; then
+                    echo -e "${YELLOW}  >> Bạn cần thêm ít nhất 1 dải port. Gõ y để thêm.${NC}"
+                    continue
+                fi
+            else
+                read -p "Thêm dải port nữa? (y/N): " am || { echo; break; }
+                [[ ! "$am" =~ ^[Yy]$ ]] && break
+            fi
+            read -p "  Port bắt đầu: " p_s || { echo; break; }
+            read -p "  Port kết thúc (= bắt đầu nếu chỉ 1 port): " p_e || { echo; break; }
+            p_e="${p_e:-$p_s}"
+            validate_port "$p_s" && validate_port "$p_e" || { echo -e "${RED}  >> Port không hợp lệ (1-65535)!${NC}"; continue; }
             [ "$p_e" -lt "$p_s" ] && { echo -e "${RED}  >> Kết thúc phải >= bắt đầu!${NC}"; continue; }
             CUSTOM_RANGES+=("${p_s}:${p_e}:${use_pp}")
+            echo -e "${GREEN}  >> Đã thêm: ${p_s}-${p_e}${NC}"
         done
         [ "${#CUSTOM_RANGES[@]}" -eq 0 ] && { echo -e "${RED}>> Cần ít nhất 1 dải port.${NC}"; exit 1; }
 
