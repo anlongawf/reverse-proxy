@@ -541,6 +541,58 @@ list_users() {
         found=1
     done < <(find /etc/frp -maxdepth 1 -name "frps-user-*.toml" 2>/dev/null | sort)
 
+    # Scan frpc-user-*.toml mồ côi (không có frps-user-*.toml tương ứng)
+    while IFS= read -r frpc_conf; do
+        local fname uname
+        fname=$(basename "$frpc_conf" .toml); uname="${fname#frpc-user-}"
+        # Bỏ qua nếu đã có metadata
+        [ -f "/etc/frp/frps-user-${uname}.toml" ] && continue
+
+        local vps_ip ctrl_port local_ip
+        vps_ip=$(grep '^serverAddr' "$frpc_conf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        ctrl_port=$(grep '^serverPort' "$frpc_conf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
+        local_ip=$(grep 'localIP' "$frpc_conf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+
+        # Tự tạo metadata để lần sau không cần scan lại
+        cat > "/etc/frp/frps-user-${uname}.toml" <<EOF
+# === Node: ${uname} | Auto-Recovered ===
+# [meta]
+# username = ${uname}
+# package = recovered
+# shared_ip = ${vps_ip:-unknown}
+# local_ip = ${local_ip:-127.0.0.1}
+# ctrl_port = ${ctrl_port:-7000}
+EOF
+        chmod 600 "/etc/frp/frps-user-${uname}.toml"
+
+        local frpc_status
+        frpc_status=$(systemctl is-active "frpc-user-${uname}.service" 2>/dev/null || echo "inactive")
+        local sc="$GREEN"; [ "$frpc_status" != "active" ] && sc="$RED"
+
+        echo -e "\n${BOLD}${uname}${NC} [${YELLOW}Recovered${NC}] (VPS: ${vps_ip:-?}:${ctrl_port:-?})"
+        echo -e "  frpc : ${sc}${frpc_status}${NC}"
+        echo -e "  Conf : ${frpc_conf}"
+
+        local ports range_str="" start="" prev=""
+        ports=$(grep "^remotePort" "$frpc_conf" 2>/dev/null \
+            | grep -oE '[0-9]+' | sort -un | tr '\n' ' ' || true)
+        for pp in $ports; do
+            if [ -z "$start" ]; then start=$pp; prev=$pp
+            elif [ "$pp" -eq $(( prev + 1 )) ]; then prev=$pp
+            else
+                [ "$start" == "$prev" ] && range_str+="${start} " || range_str+="${start}-${prev} "
+                start=$pp; prev=$pp
+            fi
+        done
+        if [ -n "$start" ]; then
+            [ "$start" == "$prev" ] && range_str+="${start}" || range_str+="${start}-${prev}"
+        fi
+        [ -n "$range_str" ] && echo -e "  Port : ${CYAN}${range_str}${NC}"
+        echo -e "  ${GREEN}>> Đã tự động tạo metadata cho node này.${NC}"
+        log_action "RECOVER_META: ${uname}"
+        found=1
+    done < <(find /etc/frp -maxdepth 1 -name "frpc-user-*.toml" 2>/dev/null | sort)
+
     [ "$found" -eq 0 ] && echo -e "  ${YELLOW}Chưa có user nào.${NC}"
     echo ""
 }
