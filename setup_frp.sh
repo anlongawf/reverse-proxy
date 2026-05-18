@@ -979,7 +979,22 @@ EOF
             IFS=':' read -r ps pe pp <<< "$r"
             write_proxies "$USERNAME" "$ps" "$pe" "$LOCAL_IP" "$SELECTED_CONF" "$pp"
         done
+
+        # Tạo file metadata để Option 5/7 nhận diện được node này
+        META_CONF="/etc/frp/frps-user-${USERNAME}.toml"
+        cat > "$META_CONF" <<EOF
+# === Node: ${USERNAME} | Manual Setup ===
+# [meta]
+# username = ${USERNAME}
+# package = manual
+# shared_ip = ${VPS_IP}
+# local_ip = ${LOCAL_IP}
+# ctrl_port = ${CTRL_PORT}
+EOF
+        chmod 600 "$META_CONF"
+
         echo -e "${GREEN}>> Config tạo tại $SELECTED_CONF${NC}"
+        log_action "MANUAL_SETUP: ${USERNAME} (VPS=${VPS_IP}:${CTRL_PORT}, Local=${LOCAL_IP})"
 
     else
         mapfile -t FRPC_CONFS < <(find /etc/frp -maxdepth 1 -name "frpc-user-*.toml" 2>/dev/null | sort)
