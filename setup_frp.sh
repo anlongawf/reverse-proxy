@@ -602,16 +602,16 @@ EOF
 # ==============================================
 clear
 echo -e "${GREEN}${BOLD}╔═══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V17.2  ║${NC}"
+echo -e "${GREEN}${BOLD}║  MINECRAFT FRP TUNNEL MANAGER V17.3  ║${NC}"
 echo -e "${GREEN}${BOLD}╚═══════════════════════════════════════╝${NC}"
 echo ""
-echo "  1. Cài FRP SERVER   (chạy trên VPS)"
+echo "  1. Cài FRP SERVER   (chạy trên VPS / thêm instance)"
 echo "  2. Thêm Node        (tạo tunnel cho 1 server game)"
 echo "  4. Cài FRP CLIENT   (chạy trên Node/server game)"
 echo "  ─────────────────────────────────────"
-echo "  5. Danh sách node"
+echo "  5. Danh sách (server + node)"
 echo "  6. Restart service"
-echo "  7. Xóa node"
+echo "  7. Xóa node / server instance"
 echo "  8. Xóa SẠCH toàn bộ"
 echo "  9. Update FRP binary"
 echo "  ─────────────────────────────────────"
@@ -626,6 +626,51 @@ case "$choice" in
 # ==============================================
 1)
     echo -e "\n${CYAN}${BOLD}--- Cài đặt FRP Server trên VPS ---${NC}"
+
+    # Xác định tên instance (main hoặc tên riêng)
+    INSTANCE_NAME="main"
+    SVC_NAME="frps-main"
+
+    # Liệt kê server đang chạy
+    local existing_servers=()
+    while IFS= read -r sf; do
+        local sn; sn=$(basename "$sf" .toml)
+        local sip sport sst
+        sip=$(grep '^bindAddr' "$sf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        sport=$(grep '^bindPort' "$sf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
+        sst=$(systemctl is-active "${sn}.service" 2>/dev/null || echo "inactive")
+        existing_servers+=("${sn}|${sip:-?}|${sport:-?}|${sst}")
+    done < <(find /etc/frp -maxdepth 1 -name "frps-main*.toml" ! -name "*.bak.*" 2>/dev/null | sort)
+
+    if [ "${#existing_servers[@]}" -gt 0 ]; then
+        echo -e "\n${CYAN}Server đang có:${NC}"
+        for es in "${existing_servers[@]}"; do
+            IFS='|' read -r _n _i _p _s <<< "$es"
+            local _sc="$GREEN"; [ "$_s" != "active" ] && _sc="$RED"
+            echo -e "  ${BOLD}${_n}${NC}  ${_i}:${_p}  [${_sc}${_s}${NC}]"
+        done
+        echo ""
+        echo -e "  ${YELLOW}1.${NC} Ghi đè server main (backup tự động)"
+        echo -e "  ${YELLOW}2.${NC} Tạo thêm server mới (chạy song song)"
+        echo -e "  ${YELLOW}0.${NC} Huỷ"
+        read -p "Chọn [0]: " srv_action || { echo; exit 1; }
+        case "${srv_action:-0}" in
+            1) INSTANCE_NAME="main"; SVC_NAME="frps-main" ;;
+            2)
+                read -p "Tên instance (vd: extra, ip2, game...): " inst_raw || { echo; exit 1; }
+                inst_raw=$(sanitize_input "${inst_raw:-}")
+                inst_raw="${inst_raw//[^a-zA-Z0-9_-]/-}"
+                [ -z "$inst_raw" ] && { echo -e "${RED}>> Tên trống.${NC}"; exit 1; }
+                [ "${#inst_raw}" -gt 32 ] && { echo -e "${RED}>> Tên quá dài (max 32).${NC}"; exit 1; }
+                INSTANCE_NAME="$inst_raw"
+                SVC_NAME="frps-main-${INSTANCE_NAME}"
+                if [ -f "/etc/frp/${SVC_NAME}.toml" ]; then
+                    echo -e "${YELLOW}>> ${SVC_NAME}.toml đã tồn tại — sẽ ghi đè (backup tự động).${NC}"
+                fi
+                ;;
+            *) echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0 ;;
+        esac
+    fi
 
     mapfile -t IP_LIST < <(ip -4 addr show scope global | grep -oE 'inet [0-9.]+' | awk '{print $2}')
     echo -e "\n${CYAN}IP trên máy:${NC}"
@@ -646,6 +691,15 @@ case "$choice" in
     CTRL_PORT=${CTRL_PORT:-7000}
     validate_port "$CTRL_PORT" || { echo -e "${RED}>> Port không hợp lệ.${NC}"; exit 1; }
 
+    # Kiểm tra port đã dùng bởi instance khác chưa
+    local port_conflict
+    port_conflict=$(find /etc/frp -maxdepth 1 -name "frps-main*.toml" ! -name "*.bak.*" \
+        -exec grep -lF "bindPort = ${CTRL_PORT}" {} \; 2>/dev/null | head -1 || true)
+    if [ -n "$port_conflict" ] && [ "$(basename "$port_conflict" .toml)" != "$SVC_NAME" ]; then
+        echo -e "${RED}>> Port ${CTRL_PORT} đã dùng bởi: $(basename "$port_conflict" .toml)${NC}"
+        exit 1
+    fi
+
     read -s -p "Auth Token: " AUTH_TOKEN || { echo; exit 1; }; echo
     [ -z "$AUTH_TOKEN" ] && { echo -e "${RED}>> Token trống.${NC}"; exit 1; }
 
@@ -658,13 +712,18 @@ case "$choice" in
         firewall_reload_if_needed
     fi
 
-    CONF="/etc/frp/frps-main.toml"
+    CONF="/etc/frp/${SVC_NAME}.toml"
+
+    # Auto-backup nếu file đã tồn tại
     if [ -f "$CONF" ]; then
-        echo -e "${YELLOW}>> frps-main.toml đã tồn tại — ghi đè sẽ restart service!${NC}"
-        read -p "Tiếp tục ghi đè? (y/N): " ow || { echo; exit 1; }
-        [[ ! "$ow" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
+        local bak_ts; bak_ts=$(date '+%Y%m%d_%H%M%S')
+        cp "$CONF" "${CONF}.bak.${bak_ts}"
+        echo -e "${GREEN}>> Đã backup → ${CONF}.bak.${bak_ts}${NC}"
+        log_action "BACKUP: ${SVC_NAME}.toml → .bak.${bak_ts}"
     fi
+
     cat > "$CONF" <<EOF
+# Instance: ${INSTANCE_NAME}
 bindAddr = "${BIND_IP}"
 bindPort = ${CTRL_PORT}
 
@@ -674,13 +733,20 @@ token = "${AUTH_TOKEN}"
 EOF
     chmod 600 "$CONF"
 
-    printf 'VPS_CTRL_PORT=%s\nAUTH_TOKEN=%s\nBIND_IP=%s\n' \
-        "$CTRL_PORT" "$AUTH_TOKEN" "$BIND_IP" > /etc/frp/.server_meta
-    chmod 600 /etc/frp/.server_meta
+    # Cập nhật .server_meta chỉ khi là instance main (để option 2 hoạt động)
+    if [ "$INSTANCE_NAME" == "main" ]; then
+        [ -f /etc/frp/.server_meta ] && {
+            local bak_ts; bak_ts=$(date '+%Y%m%d_%H%M%S')
+            cp /etc/frp/.server_meta "/etc/frp/.server_meta.bak.${bak_ts}"
+        }
+        printf 'VPS_CTRL_PORT=%s\nAUTH_TOKEN=%s\nBIND_IP=%s\n' \
+            "$CTRL_PORT" "$AUTH_TOKEN" "$BIND_IP" > /etc/frp/.server_meta
+        chmod 600 /etc/frp/.server_meta
+    fi
 
-    cat > "/etc/systemd/system/frps-main.service" <<EOF
+    cat > "/etc/systemd/system/${SVC_NAME}.service" <<EOF
 [Unit]
-Description=FRP Server Main
+Description=FRP Server — ${SVC_NAME} (${BIND_IP}:${CTRL_PORT})
 After=network.target
 
 [Service]
@@ -691,15 +757,17 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl stop frps-main 2>/dev/null || true
+    systemctl stop "$SVC_NAME" 2>/dev/null || true
     systemctl daemon-reload
-    systemctl enable --now frps-main
+    systemctl enable --now "$SVC_NAME"
 
     echo -e "\n${GREEN}${BOLD}>> FRP SERVER ĐÃ CHẠY!${NC}"
+    echo -e "${GREEN}   Instance: ${SVC_NAME}${NC}"
     echo -e "${GREEN}   Bind    : ${BIND_IP}:${CTRL_PORT}${NC}"
     echo -e "${GREEN}   Config  : ${CONF}${NC}"
-    echo -e "${YELLOW}   Token lưu tại /etc/frp/.server_meta${NC}"
-    log_action "INSTALL: frps-main trên ${BIND_IP}:${CTRL_PORT}"
+    echo -e "${GREEN}   Service : ${SVC_NAME}.service${NC}"
+    [ "$INSTANCE_NAME" == "main" ] && echo -e "${YELLOW}   Token lưu tại /etc/frp/.server_meta${NC}"
+    log_action "INSTALL: ${SVC_NAME} trên ${BIND_IP}:${CTRL_PORT}"
     ;;
 
 # ==============================================
@@ -1117,6 +1185,23 @@ EOF
 # 5. DANH SÁCH
 # ==============================================
 5)
+    # --- Liệt kê server instances ---
+    echo -e "\n${CYAN}${BOLD}=== FRP SERVER INSTANCES ===${NC}"
+    local srv_found=0
+    while IFS= read -r sf; do
+        [ -f "$sf" ] || continue
+        local sn; sn=$(basename "$sf" .toml)
+        local sip sport sst
+        sip=$(grep '^bindAddr' "$sf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        sport=$(grep '^bindPort' "$sf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
+        sst=$(systemctl is-active "${sn}.service" 2>/dev/null || echo "inactive")
+        local _sc="$GREEN"; [ "$sst" != "active" ] && _sc="$RED"
+        echo -e "  ${BOLD}${sn}${NC}  ${sip:-?}:${sport:-?}  [${_sc}${sst}${NC}]  ${CYAN}${sf}${NC}"
+        srv_found=1
+    done < <(find /etc/frp -maxdepth 1 -name "frps-main*.toml" ! -name "*.bak.*" 2>/dev/null | sort)
+    [ "$srv_found" -eq 0 ] && echo -e "  ${YELLOW}Chưa có server nào.${NC}"
+
+    # --- Liệt kê node/user ---
     list_users
     ;;
 
@@ -1128,7 +1213,7 @@ EOF
 
     mapfile -t SVC_LIST < <(
         systemctl list-units --all --no-legend 2>/dev/null | awk '{print $1}' \
-            | grep -E '^(frps-main|frp[sc]-user-.+)\.service$' | sort -u || true
+            | grep -E '^(frps-main[a-z0-9_-]*|frp[sc]-user-.+)\.service$' | sort -u || true
     )
     # Lọc rỗng
     temp=()
@@ -1167,67 +1252,106 @@ EOF
 # 7. XÓA USER
 # ==============================================
 7)
-    echo -e "\n${RED}${BOLD}--- Xóa Node ---${NC}"
+    echo -e "\n${RED}${BOLD}--- Xóa Node / Server Instance ---${NC}"
 
-    mapfile -t USER_LIST < <(
-        find /etc/frp -maxdepth 1 -name "frps-user-*.toml" 2>/dev/null \
-            | xargs -n1 basename 2>/dev/null | sed 's/frps-user-//;s/\.toml//' | sort || true
-    )
-    temp=()
-    for u in "${USER_LIST[@]+"${USER_LIST[@]}"}"; do [[ -n "$u" ]] && temp+=("$u"); done
-    USER_LIST=("${temp[@]+"${temp[@]}"}")
+    # Gom danh sách: server instances + nodes
+    local del_items=() del_types=()
 
-    [ "${#USER_LIST[@]}" -eq 0 ] && { echo -e "${YELLOW}>> Không có user nào.${NC}"; exit 0; }
+    # Server instances (frps-main-*)
+    while IFS= read -r sf; do
+        [ -f "$sf" ] || continue
+        local sn; sn=$(basename "$sf" .toml)
+        [ "$sn" == "frps-main" ] && continue  # Không cho xóa main qua đây
+        local sip sport
+        sip=$(grep '^bindAddr' "$sf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        sport=$(grep '^bindPort' "$sf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
+        del_items+=("${sn} (server — ${sip:-?}:${sport:-?})")
+        del_types+=("server_instance")
+    done < <(find /etc/frp -maxdepth 1 -name "frps-main-*.toml" ! -name "*.bak.*" 2>/dev/null | sort)
 
-    echo -e "${CYAN}Danh sách user:${NC}"
-    for i in "${!USER_LIST[@]}"; do echo -e "  ${YELLOW}$((i+1)).${NC} ${USER_LIST[$i]}"; done
+    # Nodes (frps-user-*)
+    while IFS= read -r uf; do
+        [ -f "$uf" ] || continue
+        local un; un=$(basename "$uf" .toml | sed 's/frps-user-//')
+        del_items+=("${un} (node)")
+        del_types+=("node")
+    done < <(find /etc/frp -maxdepth 1 -name "frps-user-*.toml" 2>/dev/null | sort)
 
-    read -p "Chọn số user cần xóa: " didx || { echo; exit 1; }
-    validate_index "$didx" "${#USER_LIST[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
-    DEL_USER="${USER_LIST[$((didx-1))]}"
+    [ "${#del_items[@]}" -eq 0 ] && { echo -e "${YELLOW}>> Không có gì để xóa.${NC}"; exit 0; }
 
-    read -p "$(echo -e "${RED}>> Xác nhận xóa '${DEL_USER}'? (y/N): ${NC}")" del_confirm || { echo; exit 1; }
+    echo -e "${CYAN}Danh sách:${NC}"
+    for i in "${!del_items[@]}"; do echo -e "  ${YELLOW}$((i+1)).${NC} ${del_items[$i]}"; done
+
+    read -p "Chọn số cần xóa: " didx || { echo; exit 1; }
+    validate_index "$didx" "${#del_items[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
+    local sel_type="${del_types[$((didx-1))]}"
+    local sel_label="${del_items[$((didx-1))]}"
+
+    read -p "$(echo -e "${RED}>> Xác nhận xóa '${sel_label}'? (y/N): ${NC}")" del_confirm || { echo; exit 1; }
     [[ ! "$del_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
 
-    FRPC_DEL="/etc/frp/frpc-user-${DEL_USER}.toml"
-    FRPS_DEL="/etc/frp/frps-user-${DEL_USER}.toml"
+    if [ "$sel_type" == "server_instance" ]; then
+        # ===== Xóa server instance =====
+        local svc_name; svc_name=$(echo "$sel_label" | awk '{print $1}')
+        local conf_del="/etc/frp/${svc_name}.toml"
 
-    # Xóa loopback IP nếu có
-    if [ -f "$FRPC_DEL" ]; then
-        _del_lip=$(grep 'localIP' "$FRPC_DEL" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        [ -n "${_del_lip:-}" ] && remove_loopback_ip "$_del_lip" || true
-    fi
+        # Đóng firewall port
+        FW=$(detect_firewall)
+        if [ "$FW" != "none" ] && [ -f "$conf_del" ]; then
+            local bind_p; bind_p=$(awk '/^bindPort/{print $NF}' "$conf_del" 2>/dev/null | head -1)
+            [ -n "${bind_p:-}" ] && { firewall_close_port "$bind_p" "tcp"; firewall_reload_if_needed; }
+        fi
 
-    FW=$(detect_firewall)
-    if [ "$FW" != "none" ] && [ -f "$FRPC_DEL" ]; then
-        echo -e "${CYAN}>> Đóng firewall ports...${NC}"
-        for dp in $(extract_ports_from_config "$FRPC_DEL"); do
-            firewall_close_port "$dp" "tcp" "quiet"
-            firewall_close_port "$dp" "udp" "quiet"
+        systemctl stop "${svc_name}.service" 2>/dev/null || true
+        systemctl disable "${svc_name}.service" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${svc_name}.service"
+        rm -f "$conf_del"
+        systemctl daemon-reload
+        echo -e "${GREEN}${BOLD}>> Đã xóa server instance '${svc_name}'.${NC}"
+        log_action "DELETE_SERVER_INSTANCE: ${svc_name}"
+
+    else
+        # ===== Xóa node (giữ logic cũ) =====
+        local DEL_USER; DEL_USER=$(echo "$sel_label" | awk '{print $1}')
+        FRPC_DEL="/etc/frp/frpc-user-${DEL_USER}.toml"
+        FRPS_DEL="/etc/frp/frps-user-${DEL_USER}.toml"
+
+        # Xóa loopback IP nếu có
+        if [ -f "$FRPC_DEL" ]; then
+            _del_lip=$(grep 'localIP' "$FRPC_DEL" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            [ -n "${_del_lip:-}" ] && remove_loopback_ip "$_del_lip" || true
+        fi
+
+        FW=$(detect_firewall)
+        if [ "$FW" != "none" ] && [ -f "$FRPC_DEL" ]; then
+            echo -e "${CYAN}>> Đóng firewall ports...${NC}"
+            for dp in $(extract_ports_from_config "$FRPC_DEL"); do
+                firewall_close_port "$dp" "tcp" "quiet"
+                firewall_close_port "$dp" "udp" "quiet"
+            done
+            if [ -f "$FRPS_DEL" ]; then
+                dcp=$(awk '/^bindPort/{print $NF}' "$FRPS_DEL" 2>/dev/null | head -1)
+                [ -n "${dcp:-}" ] && firewall_close_port "$dcp" "tcp"
+            fi
+            firewall_reload_if_needed
+            echo -e "${YELLOW}   Đã đóng ports của ${DEL_USER}.${NC}"
+        fi
+
+        for svc_type in frps frpc; do
+            SVC="${svc_type}-user-${DEL_USER}.service"
+            systemctl stop "$SVC" 2>/dev/null || true
+            systemctl disable "$SVC" 2>/dev/null || true
+            if [ -f "/etc/systemd/system/${SVC}" ]; then
+                rm -f "/etc/systemd/system/${SVC}"
+                echo -e "${GREEN}>> Xóa service ${SVC}.${NC}"
+            fi
         done
-        # Đóng control port nếu dedicated
-        if [ -f "$FRPS_DEL" ]; then
-            dcp=$(awk '/^bindPort/{print $NF}' "$FRPS_DEL" 2>/dev/null | head -1)
-            [ -n "${dcp:-}" ] && firewall_close_port "$dcp" "tcp"
-        fi
-        firewall_reload_if_needed
-        echo -e "${YELLOW}   Đã đóng ports của ${DEL_USER}.${NC}"
+
+        rm -f "$FRPS_DEL" "$FRPC_DEL"
+        systemctl daemon-reload
+        echo -e "${GREEN}${BOLD}>> Đã xóa node '${DEL_USER}'.${NC}"
+        log_action "DELETE_NODE: ${DEL_USER}"
     fi
-
-    for svc_type in frps frpc; do
-        SVC="${svc_type}-user-${DEL_USER}.service"
-        systemctl stop "$SVC" 2>/dev/null || true
-        systemctl disable "$SVC" 2>/dev/null || true
-        if [ -f "/etc/systemd/system/${SVC}" ]; then
-            rm -f "/etc/systemd/system/${SVC}"
-            echo -e "${GREEN}>> Xóa service ${SVC}.${NC}"
-        fi
-    done
-
-    rm -f "$FRPS_DEL" "$FRPC_DEL"
-    systemctl daemon-reload
-    echo -e "${GREEN}${BOLD}>> Đã xóa '${DEL_USER}'.${NC}"
-    log_action "DELETE_NODE: ${DEL_USER}"
     ;;
 
 # ==============================================
@@ -1262,7 +1386,7 @@ EOF
             done
         done
         # FIX: đổi tên biến từ "cp" (trùng lệnh cp) sang "bind_cp"
-        for conf in /etc/frp/frps-user-*.toml /etc/frp/frps-main.toml; do
+        for conf in /etc/frp/frps-user-*.toml /etc/frp/frps-main*.toml; do
             [ -f "$conf" ] || continue
             bind_cp=$(awk '/^bindPort/{print $NF}' "$conf" 2>/dev/null | head -1)
             [ -n "${bind_cp:-}" ] && firewall_close_port "$bind_cp" "tcp"
