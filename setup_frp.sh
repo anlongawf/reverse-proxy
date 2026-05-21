@@ -632,10 +632,10 @@ case "$choice" in
     SVC_NAME="frps-main"
 
     # Liệt kê server đang chạy
-    local existing_servers=()
+    existing_servers=()
     while IFS= read -r sf; do
-        local sn; sn=$(basename "$sf" .toml)
-        local sip sport sst
+        sn=""; sn=$(basename "$sf" .toml)
+        sip=""; sport=""; sst=""
         sip=$(grep '^bindAddr' "$sf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         sport=$(grep '^bindPort' "$sf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
         sst=$(systemctl is-active "${sn}.service" 2>/dev/null || echo "inactive")
@@ -646,7 +646,7 @@ case "$choice" in
         echo -e "\n${CYAN}Server đang có:${NC}"
         for es in "${existing_servers[@]}"; do
             IFS='|' read -r _n _i _p _s <<< "$es"
-            local _sc="$GREEN"; [ "$_s" != "active" ] && _sc="$RED"
+             _sc="$GREEN"; [ "$_s" != "active" ] && _sc="$RED"
             echo -e "  ${BOLD}${_n}${NC}  ${_i}:${_p}  [${_sc}${_s}${NC}]"
         done
         echo ""
@@ -692,7 +692,7 @@ case "$choice" in
     validate_port "$CTRL_PORT" || { echo -e "${RED}>> Port không hợp lệ.${NC}"; exit 1; }
 
     # Kiểm tra port đã dùng bởi instance khác chưa
-    local port_conflict
+    port_conflict=""
     port_conflict=$(find /etc/frp -maxdepth 1 -name "frps-main*.toml" ! -name "*.bak.*" \
         -exec grep -lF "bindPort = ${CTRL_PORT}" {} \; 2>/dev/null | head -1 || true)
     if [ -n "$port_conflict" ] && [ "$(basename "$port_conflict" .toml)" != "$SVC_NAME" ]; then
@@ -716,7 +716,7 @@ case "$choice" in
 
     # Auto-backup nếu file đã tồn tại
     if [ -f "$CONF" ]; then
-        local bak_ts; bak_ts=$(date '+%Y%m%d_%H%M%S')
+        bak_ts=""; bak_ts=$(date '+%Y%m%d_%H%M%S')
         cp "$CONF" "${CONF}.bak.${bak_ts}"
         echo -e "${GREEN}>> Đã backup → ${CONF}.bak.${bak_ts}${NC}"
         log_action "BACKUP: ${SVC_NAME}.toml → .bak.${bak_ts}"
@@ -736,7 +736,7 @@ EOF
     # Cập nhật .server_meta chỉ khi là instance main (để option 2 hoạt động)
     if [ "$INSTANCE_NAME" == "main" ]; then
         [ -f /etc/frp/.server_meta ] && {
-            local bak_ts; bak_ts=$(date '+%Y%m%d_%H%M%S')
+            bak_ts=""; bak_ts=$(date '+%Y%m%d_%H%M%S')
             cp /etc/frp/.server_meta "/etc/frp/.server_meta.bak.${bak_ts}"
         }
         printf 'VPS_CTRL_PORT=%s\nAUTH_TOKEN=%s\nBIND_IP=%s\n' \
@@ -1187,15 +1187,15 @@ EOF
 5)
     # --- Liệt kê server instances ---
     echo -e "\n${CYAN}${BOLD}=== FRP SERVER INSTANCES ===${NC}"
-    local srv_found=0
+    srv_found=0
     while IFS= read -r sf; do
         [ -f "$sf" ] || continue
-        local sn; sn=$(basename "$sf" .toml)
-        local sip sport sst
+        sn=""; sn=$(basename "$sf" .toml)
+        sip=""; sport=""; sst=""
         sip=$(grep '^bindAddr' "$sf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         sport=$(grep '^bindPort' "$sf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
         sst=$(systemctl is-active "${sn}.service" 2>/dev/null || echo "inactive")
-        local _sc="$GREEN"; [ "$sst" != "active" ] && _sc="$RED"
+         _sc="$GREEN"; [ "$sst" != "active" ] && _sc="$RED"
         echo -e "  ${BOLD}${sn}${NC}  ${sip:-?}:${sport:-?}  [${_sc}${sst}${NC}]  ${CYAN}${sf}${NC}"
         srv_found=1
     done < <(find /etc/frp -maxdepth 1 -name "frps-main*.toml" ! -name "*.bak.*" 2>/dev/null | sort)
@@ -1255,14 +1255,14 @@ EOF
     echo -e "\n${RED}${BOLD}--- Xóa Node / Server Instance ---${NC}"
 
     # Gom danh sách: server instances + nodes
-    local del_items=() del_types=()
+    del_items=() del_types=()
 
     # Server instances (frps-main-*)
     while IFS= read -r sf; do
         [ -f "$sf" ] || continue
-        local sn; sn=$(basename "$sf" .toml)
+        sn=""; sn=$(basename "$sf" .toml)
         [ "$sn" == "frps-main" ] && continue  # Không cho xóa main qua đây
-        local sip sport
+        sip=""; sport=""
         sip=$(grep '^bindAddr' "$sf" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         sport=$(grep '^bindPort' "$sf" 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
         del_items+=("${sn} (server — ${sip:-?}:${sport:-?})")
@@ -1272,7 +1272,7 @@ EOF
     # Nodes (frps-user-*)
     while IFS= read -r uf; do
         [ -f "$uf" ] || continue
-        local un; un=$(basename "$uf" .toml | sed 's/frps-user-//')
+        un=""; un=$(basename "$uf" .toml | sed 's/frps-user-//')
         del_items+=("${un} (node)")
         del_types+=("node")
     done < <(find /etc/frp -maxdepth 1 -name "frps-user-*.toml" 2>/dev/null | sort)
@@ -1284,21 +1284,21 @@ EOF
 
     read -p "Chọn số cần xóa: " didx || { echo; exit 1; }
     validate_index "$didx" "${#del_items[@]}" || { echo -e "${RED}>> Không hợp lệ.${NC}"; exit 1; }
-    local sel_type="${del_types[$((didx-1))]}"
-    local sel_label="${del_items[$((didx-1))]}"
+     sel_type="${del_types[$((didx-1))]}"
+     sel_label="${del_items[$((didx-1))]}"
 
     read -p "$(echo -e "${RED}>> Xác nhận xóa '${sel_label}'? (y/N): ${NC}")" del_confirm || { echo; exit 1; }
     [[ ! "$del_confirm" =~ ^[Yy]$ ]] && { echo -e "${YELLOW}>> Huỷ.${NC}"; exit 0; }
 
     if [ "$sel_type" == "server_instance" ]; then
         # ===== Xóa server instance =====
-        local svc_name; svc_name=$(echo "$sel_label" | awk '{print $1}')
-        local conf_del="/etc/frp/${svc_name}.toml"
+        svc_name=""; svc_name=$(echo "$sel_label" | awk '{print $1}')
+         conf_del="/etc/frp/${svc_name}.toml"
 
         # Đóng firewall port
         FW=$(detect_firewall)
         if [ "$FW" != "none" ] && [ -f "$conf_del" ]; then
-            local bind_p; bind_p=$(awk '/^bindPort/{print $NF}' "$conf_del" 2>/dev/null | head -1)
+            bind_p=""; bind_p=$(awk '/^bindPort/{print $NF}' "$conf_del" 2>/dev/null | head -1)
             [ -n "${bind_p:-}" ] && { firewall_close_port "$bind_p" "tcp"; firewall_reload_if_needed; }
         fi
 
@@ -1312,7 +1312,7 @@ EOF
 
     else
         # ===== Xóa node (giữ logic cũ) =====
-        local DEL_USER; DEL_USER=$(echo "$sel_label" | awk '{print $1}')
+        DEL_USER=""; DEL_USER=$(echo "$sel_label" | awk '{print $1}')
         FRPC_DEL="/etc/frp/frpc-user-${DEL_USER}.toml"
         FRPS_DEL="/etc/frp/frps-user-${DEL_USER}.toml"
 
